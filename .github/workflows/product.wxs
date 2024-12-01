@@ -32,7 +32,7 @@
                         <File Id="ApplicationFile10" Source="dist\gui\_socket.pyd" />
                         <File Id="ApplicationFile11" Source="dist\gui\_ssl.pyd" />
                         <File Id="ApplicationFile12" Source="dist\gui\_uuid.pyd" />
-                        <File Id="ApplicationFile13" Source="dist\gui\_wmi.pyd" />
+                        <File Id="ApplicationFile13" Source="dist\gui\_cffi_backend.cp311-win_amd64.pyd" />
                         <File Id="ApplicationFile14" Source="dist\gui\base_library.zip" />
                         <File Id="ApplicationFile15" Source="ecu_definitions.py" />
                         <File Id="ApplicationFile16" Source="gkflasher.py" />
@@ -42,7 +42,7 @@
                         <File Id="ApplicationFile20" Source="LICENSE" />
                         <File Id="ApplicationFile21" Source="dist\gui\pyexpat.pyd" />
                         <File Id="ApplicationFile22" Source="dist\gui\python3.dll" />
-                        <File Id="ApplicationFile23" Source="dist\gui\python312.dll" />
+                        <File Id="ApplicationFile23" Source="dist\gui\python311.dll" />
                         <File Id="ApplicationFile24" Source="dist\gui\select.pyd" />
                         <File Id="ApplicationFile25" Source="dist\gui\unicodedata.pyd" />
                     </Component>
@@ -67,7 +67,7 @@
                             <File Id="ApplicationFile34" Source="dist\gui\PyQt5\QtCore.pyd" />
                             <File Id="ApplicationFile35" Source="dist\gui\PyQt5\QtGui.pyd" />
                             <File Id="ApplicationFile36" Source="dist\gui\PyQt5\QtWidgets.pyd" />
-                            <File Id="ApplicationFile37" Source="dist\gui\PyQt5\sip.cp312-win_amd64.pyd" />
+                            <File Id="ApplicationFile37" Source="dist\gui\PyQt5\sip.cp311-win_amd64.pyd" />
                         </Component>
                             <Directory Id="QT5DIR" Name="Qt5">
                                     <Directory Id="PYQT5BINDIR" Name="bin">
