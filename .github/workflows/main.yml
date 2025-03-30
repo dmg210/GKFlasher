@@ -16,7 +16,7 @@ jobs:
             echo "version=$buildversion" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
 
       - name: Install Python
-        uses: actions/setup-python@v1
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12.8'
           architecture: 'x64'
