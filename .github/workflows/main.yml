@@ -18,8 +18,9 @@ jobs:
       - name: Install Python
         uses: actions/setup-python@v1
         with:
-          python-version: '3.12.9'
+          python-version: '3.12.8'
           architecture: 'x64'
+          allow-prereleases: true
 
       - name: Install GKFlasher Requirements
         run: |
@@ -27,7 +28,7 @@ jobs:
           
       - name: Install Build Environment Prerequisites
         run: |
-          pip install pyinstaller==6.12.0
+          pip install pyinstaller==6.11.0
           pip install cryptography==43.0.3
           pip install pillow==11.0.0
           
@@ -35,10 +36,10 @@ jobs:
         run: |
           python -m PyInstaller .github/workflows/gui.spec
 #  for debug purposes, upload the build artifact as a zip.         
-      - uses: actions/upload-artifact@v4
-        with:
+#      - uses: actions/upload-artifact@v4
+#        with:
 #          ##name: Upload PyInstaller "Output" Directory
-          path: dist/*
+#          path: dist/*
 
       - name: Install WiX
         run: dotnet tool install --global wix --version 5.0.2
