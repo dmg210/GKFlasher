@@ -109,7 +109,7 @@ QProgressBar::chunk {
 /* About Box - Note: Font set in gkflasher.ui HTML */
 QTextBrowser {
     background-color: rgba(44, 62, 80, 0.8); /* Dark transparent background (80% opacity) */
-    background-image: url("assets/Siemens_T_Logo.ico");
+    background-image: url("../assets/Siemens_T_Logo.ico");
     background-repeat: no-repeat;
     background-position: right;
     color: #ecf0f1;
