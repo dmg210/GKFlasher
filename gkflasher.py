@@ -141,7 +141,7 @@ def load_config (config_filename):
 	return yaml.safe_load(open('gkflasher.yml'))
 
 def load_arguments ():
-	parser = argparse.ArgumentParser(prog='GKFlasher v{}'.format(__version__))
+	parser = argparse.ArgumentParser(prog='GKFlasher {}'.format(__version__))
 	parser.add_argument('-p', '--protocol', help='Protocol to use. canbus or kline')
 	parser.add_argument('-i', '--interface')
 	parser.add_argument('-b', '--baudrate', type=int)
@@ -350,7 +350,7 @@ def packet2hex (packet: RawPacket) -> str:
 if __name__ == '__main__':
 	GKFlasher_config, args = load_arguments()
 
-	print('[*] GKFlasher v{}'.format(__version__))
+	print('[*] GKFlasher {}'.format(__version__))
 
 	if (args.correct_checksum):
 		correct_checksum(filename=args.correct_checksum)
