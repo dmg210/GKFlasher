@@ -39,6 +39,11 @@ if os.name == 'nt':
 else: #nix
 	home = os.path.expanduser(os.sep.join(["~","Documents","GKFlasher Files"]))
 
+# Change the working directory
+if not os.path.exists(home):
+	os.makedirs(home)
+os.chdir (home)
+
 try:
 	log_path = home + '/gkflasher_debug.log'
 	with open(log_path, 'a+') as f:
@@ -129,11 +134,6 @@ class Ui(QtWidgets.QMainWindow):
 		self.request_new_password_signal.connect(self.request_new_password_from_user)
 		self.request_vin_signal.connect(self.request_vin_from_user)
 		self.request_vin_to_pin_signal.connect(self.request_vin_to_pin_from_user)
-
-		# Change the working directory
-		if not os.path.exists(home):
-			os.makedirs(home)
-		os.chdir (home)
 
 	def handle_exception (self, data):
 		exception, traceback_str = data
