@@ -22,7 +22,7 @@ jobs:
           git fetch --tags --force
           latest="$(git tag -l 'v*' --sort=-v:refname | head -n1 || true)"
           if [ -z "$latest" ]; then
-            echo "tag=v1.0.59" >> $GITHUB_OUTPUT
+            echo "tag=v1.0.148" >> $GITHUB_OUTPUT
           else
             echo "tag=$latest" >> $GITHUB_OUTPUT
           fi
