@@ -38,6 +38,7 @@
                         <File Id="ApplicationFile14" Source="gkflasher.py" />
                         <File Id="ApplicationFile15" Source="gkflasher.yml" />
                         <File Id="ApplicationFile16" Source="dist\gui\gui.exe" />
+                        <File Id="ApplicationFile161" Source="dist\gui\gui.py" />
                         <File Id="ApplicationFile17" Source="dist\gui\libffi-8.dll" />
                         <File Id="ApplicationFile18" Source="LICENSE" />
                         <File Id="ApplicationFile19" Source="dist\gui\pyexpat.pyd" />
@@ -159,4 +160,5 @@
         <Property Id='ARPNOMODIFY'>1</Property>
 
     </Product>
+
 </Wix>
