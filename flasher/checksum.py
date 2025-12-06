@@ -162,7 +162,27 @@ cks_types = [ # todo: incorporate into ECU definitions
 		    	'bin_offset': 0
 		    }
 	    ]
-    }
+    },
+	{
+        'name': 'SIMK2K (Elantra 2.0 Beta)',
+        'identification_flag_address': 0x01401E,
+        'regions': [
+        	{
+		        'name': 'Calibration',
+		        'flag_address': 0x01401E,
+		        'init_address': 0x01200C,
+		        'cks_address': 0x014000,
+		        'bin_offset': -0x080000
+		    },
+		    {
+		    	'name': 'Program',
+		    	'flag_address': 0x17EFE,
+		    	'init_address': 0x020052,
+		    	'cks_address': 0x020010,
+		    	'bin_offset': -0x080000
+		    }
+	    ]
+	},
 ]
 
 def read_and_reverse (payload, start, length):
