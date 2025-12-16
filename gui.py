@@ -42,7 +42,7 @@ else: #nix
 try:
 	log_path = home + '/gkflasher_debug.log'
 	with open(log_path, 'a+') as f:
-		f.write('\n\nGKFlasher GUI launched, v{}\n'.format(__version__))
+		f.write('\n\nGKFlasher GUI launched, {}\n'.format(__version__))
 	logging.basicConfig(level=4, filename=log_path, datefmt='%Y-%m-%d %H:%M:%S.%f')
 except KeyboardInterrupt:
 	pass
@@ -166,6 +166,7 @@ class Ui(QtWidgets.QMainWindow):
 		self.readCalibrationZone.clicked.connect(lambda: self.click_handler(self.read_calibration_zone))
 		self.readProgramZone.clicked.connect(lambda: self.click_handler(self.read_program_zone))
 		self.readFull.clicked.connect(lambda: self.click_handler(self.full_read))
+		self.readDtcs.clicked.connect(lambda: self.click_handler(self.read_dtcs))
 
 		self.displayECUID.clicked.connect(lambda: self.click_handler(self.display_ecu_identification))
 
@@ -551,6 +552,37 @@ class Ui(QtWidgets.QMainWindow):
 		address_stop = ecu.get_program_section_address()+ecu.get_program_section_size()
 
 		self.gui_read_eeprom(ecu, address_start=address_start, address_stop=address_stop, escalate_privileges=True, output_filename=output_filename, log_callback=log_callback, progress_callback=progress_callback)
+		self.disconnect_ecu(ecu)
+
+	def read_dtcs(self, progress_callback, log_callback):
+		ecu = self.initialize_ecu(log_callback)
+
+		if (ecu == False):
+			self._close_bus(log_callback)
+			return
+
+		log_callback.emit('[*] Reading diagnostic trouble codes')
+		ecu.bus.execute(kwp2000.commands.StartDiagnosticSession(kwp2000.enums.DiagnosticSession.DEFAULT,
+																ecu.get_desired_baudrate().index))
+
+		dtcs_raw = ecu.bus.execute(
+			kwp2000.commands.ReadDTCsByStatus(
+				kwp2000.enums.DtcStatus.REQUEST_IDENTIFIED_DTC_AND_STATUS,
+				kwp2000.enums.DtcGroup.POWERTRAIN
+			)
+		).get_data()
+
+		dtc_amount = dtcs_raw[0]
+		log_callback.emit('[*] Amount of DTCs: {}'.format(dtc_amount))
+		dtcs = {}
+		for x in range(dtc_amount):
+			dtc = int.from_bytes(dtcs_raw[1:][(x*3):(x*3) + 2])
+			dtc_status = dtcs_raw[1:][(x*3) + 2]
+			dtcs[dtc] = dtc_status
+
+		for dtc, status in dtcs.items():
+			log_callback.emit('[*] DTC: P{} ({})'.format(f"{dtc:04x}", bin(status)))
+
 		self.disconnect_ecu(ecu)
 
 	def display_ecu_identification (self, progress_callback, log_callback):

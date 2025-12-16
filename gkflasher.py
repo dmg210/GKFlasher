@@ -137,6 +137,28 @@ def cli_clear_adaptive_values (ecu):
 	ecu.clear_adaptive_values()
 	print('Done! Turn off ignition for 10 seconds to apply changes.')
 
+def cli_read_dtcs (ecu):
+	print('[*] Reading diagnostic trouble codes')
+	ecu.bus.execute(kwp2000.commands.StartDiagnosticSession(kwp2000.enums.DiagnosticSession.DEFAULT, ecu.get_desired_baudrate().index))
+
+	dtcs_raw = ecu.bus.execute(
+		kwp2000.commands.ReadDTCsByStatus(
+			kwp2000.enums.DtcStatus.REQUEST_IDENTIFIED_DTC_AND_STATUS,
+			kwp2000.enums.DtcGroup.POWERTRAIN
+		)
+	).get_data()
+
+	dtc_amount = dtcs_raw[0]
+	print('[*] Amount of DTCs: {}'.format(dtc_amount))
+	dtcs = {}
+	for x in range(dtc_amount):
+		dtc = int.from_bytes(dtcs_raw[1:][(x * 3):(x * 3) + 2])
+		dtc_status = dtcs_raw[1:][(x * 3) + 2]
+		dtcs[dtc] = dtc_status
+
+	for dtc, status in dtcs.items():
+		print('[*] DTC: P{} ({})'.format(f"{dtc:04x}", bin(status)))
+
 def load_config (config_filename):
 	return yaml.safe_load(open('gkflasher.yml'))
 
@@ -152,6 +174,7 @@ def load_arguments ():
 	parser.add_argument('-r', '--read', action='store_true')
 	parser.add_argument('--read-calibration', action='store_true')
 	parser.add_argument('--read-program', action='store_true')
+	parser.add_argument('--read-dtcs', action='store_true')
 	parser.add_argument('--id', action='store_true')
 	parser.add_argument('--correct-checksum')
 	parser.add_argument('--bin-to-sie')
@@ -325,6 +348,8 @@ def main(bus: kwp2000.Kwp2000Protocol, args):
 		address_start = ecu.get_program_section_address()
 		address_stop = address_start+ecu.get_program_section_size()
 		cli_read_eeprom(ecu, eeprom_size, address_start=address_start, address_stop=address_stop, output_filename=args.output)
+	if (args.read_dtcs):
+		cli_read_dtcs(ecu)
 
 	if (args.flash):
 		cli_flash_eeprom(ecu, input_filename=args.flash)
