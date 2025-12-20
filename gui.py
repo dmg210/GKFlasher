@@ -42,7 +42,7 @@ else: #nix
 try:
 	log_path = home + '/gkflasher_debug.log'
 	with open(log_path, 'a+') as f:
-		f.write('\n\nGKFlasher GUI launched, {}\n'.format(____))
+		f.write('\n\nGKFlasher GUI launched, {}\n'.format(__version__))
 	logging.basicConfig(level=4, filename=log_path, datefmt='%Y-%m-%d %H:%M:%S.%f')
 except KeyboardInterrupt:
 	pass
