@@ -147,6 +147,20 @@ cks_types = [ # todo: incorporate into ECU definitions
 		        'cks_address': 0x3EEC,
 		        'bin_offset': 0
 		    },
+		    {
+		    	'name': 'MTOS',
+		    	'flag_address': 0x97EFE,
+		    	'init_address': 0xC012,
+		    	'cks_address': 0xC000,
+		    	'bin_offset': 0
+		    },
+		    {
+		    	'name': 'RSW',
+		    	'flag_address': 0x97EFE,
+		    	'init_address': 0x82014,
+		    	'cks_address': 0x82000,
+		    	'bin_offset': 0
+		    },
         	{
 	        	'name': 'Calibration',
 		        'flag_address': 0x97EFE,
