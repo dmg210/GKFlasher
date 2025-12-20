@@ -39,6 +39,13 @@ cks_types = [ # todo: incorporate into ECU definitions
 		        'cks_address': 0x3EEC, # 663057/58
 		        'bin_offset': -0x080000
 		    },
+		    {
+		    	'name': 'MTOS',
+		    	'flag_address': 0x017EFE,
+		    	'init_address': 0xC012,
+		    	'cks_address': 0xC000,
+		    	'bin_offset': 0
+		    },
         	{
 		        'name': 'Calibration',
 		        'flag_address': 0x017EFE,
@@ -65,6 +72,13 @@ cks_types = [ # todo: incorporate into ECU definitions
 		        'init_address': 0x3FE4,
 		        'cks_address': 0x3EF4,
 		        'bin_offset': 0
+		    },
+		    {
+		    	'name': 'MTOS',
+		    	'flag_address': 0x017EFE,
+		    	'init_address': 0xC012,
+		    	'cks_address': 0xC000,
+		    	'bin_offset': 0
 		    },
         	{
 		        'name': 'Calibration',
@@ -213,11 +227,20 @@ def checksum (payload, start, stop, init):
 	checksum = crc16(payload[start:stop])
 	return checksum
 
-def detect_offsets (payload):
-	for cks_type in cks_types:
-		flag = payload[cks_type['identification_flag_address']:cks_type['identification_flag_address']+2]
-		if (flag == b'OK'):
-			return cks_type # todo: unpack
+def detect_offsets(payload):
+    for cks_type in cks_types:
+        if payload[cks_type['identification_flag_address']:cks_type['identification_flag_address']+2] == b'OK':
+            # Check MTOS signature
+            for region in cks_type.get('regions', []):
+                if region.get('name') == 'MTOS' and payload[region['init_address']:region['init_address']+2] == b'MT':
+                    return cks_type  # MTOS valid
+            
+            # MTOS invalid/missing -> return without MTOS region
+            safe_type = cks_type.copy()
+            safe_type['regions'] = [r for r in cks_type['regions'] if r.get('name') != 'MTOS']
+            return safe_type
+
+    return None
 
 def correct_checksum (filename):
 	print('[*] Reading {}'.format(filename))
