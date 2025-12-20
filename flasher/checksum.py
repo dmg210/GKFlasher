@@ -37,7 +37,7 @@ cks_types = [ # todo: incorporate into ECU definitions
 		        'flag_address': 0x017EFE,
 		        'init_address': 0x3FE4,
 		        'cks_address': 0x3EEC, # 663057/58
-		        'bin_offset': 0
+		        'bin_offset': -0x080000
 		    },
         	{
 		        'name': 'Calibration',
