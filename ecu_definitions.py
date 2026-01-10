@@ -82,16 +82,16 @@ ECU_IDENTIFICATION_TABLE = [
 		}
 	},
 	{
-		'offset': 0x92000,
-		'expected': [b'\x36\x36\x35\x30'], # ca66
+		'offset': 0x92040,
+		'expected': [b'\x07\x71\xda\xba'],
  		'ecu': {
 			'name': 'SIMK2K (Elantra 2.0 Beta)',
 			'eeprom_size_bytes': 524288,
 			'bin_offset': -0x80000,
 			'calibration_section_address': 0x92000,
-			'calibration_size_bytes': 0x12000,
-			'program_section_address': 0x24000,
-			'program_section_size': 0x5BFFF
+			'calibration_size_bytes': 0xCF00,
+			'program_section_address': 0xA0000,
+			'program_section_size': 0x60000
 		}
 	},
 ]
