@@ -4,10 +4,10 @@ from flasher.ecu import ECU
 from flasher.smartra import calculate_smartra_pin
 
 immo_status = {
-	0: 'Not learnt',
+	0: 'Neutral',
 	1: 'Learnt',
 	2: 'Virgin',
-	3: 'Neutral',
+	3: 'Not learnt',
 	4: 'Teaching not accepted (locked by wrong data)',
 	5: 'Virgin status - no teaching',
 	6: 'Invalid key'
