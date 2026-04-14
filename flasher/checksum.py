@@ -1,4 +1,4 @@
-import crcmod, sys
+import crcmod, sys, copy
 
 cks_types = [ # todo: incorporate into ECU definitions
 	{
@@ -229,16 +229,24 @@ def checksum (payload, start, stop, init):
 
 def detect_offsets(payload):
     for cks_type in cks_types:
-        if payload[cks_type['identification_flag_address']:cks_type['identification_flag_address']+2] == b'OK':
-            # Check MTOS signature
-            for region in cks_type.get('regions', []):
-                if region.get('name') == 'MTOS' and payload[region['init_address']:region['init_address']+2] == b'MT':
-                    return cks_type  # MTOS valid
-            
-            # MTOS invalid/missing -> return without MTOS region
-            safe_type = cks_type.copy()
-            safe_type['regions'] = [r for r in cks_type['regions'] if r.get('name') != 'MTOS']
-            return safe_type
+        if payload[cks_type['identification_flag_address']:cks_type['identification_flag_address']+2] != b'OK':
+            continue
+
+        has_mtos = False
+        for region in cks_type.get('regions', []):
+            if region.get('name') == 'MTOS' and payload[region['init_address']:region['init_address']+2] == b'MT':
+                has_mtos = True
+                break
+
+        fresh_type = copy.deepcopy(cks_type)
+
+        if not has_mtos:
+            fresh_type['regions'] = [
+                r for r in fresh_type.get('regions', [])
+                if r.get('name') != 'MTOS'
+            ]
+
+        return fresh_type
 
     return None
 
