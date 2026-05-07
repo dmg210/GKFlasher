@@ -10,10 +10,28 @@ ECU_IDENTIFICATION_TABLE = [
 			'name': 'SIMK43 8mbit',
 			'eeprom_size_bytes': 1048576, # (1024 KiB)
 			'bin_offset': 0,
-			'calibration_section_address': 0x90000,
-			'calibration_size_bytes': 0x10000, # 65536 bytes (64 KiB)
-			'program_section_address': 0xA0000,
-			'program_section_size': 0x60000
+			'regions': {
+				'calibration': {
+					'read': {
+						'address': 0x90000,
+						'size': 0x10000 # 65536 bytes (64 KiB)
+					},
+					'write': {
+						'address': 0x90000,
+						'size': 0x10000
+					}
+				},
+				'program': {
+					'read': {
+						'address': 0xA0000,
+						'size': 0x60000
+					},
+					'write': {
+						'address': 0xA0000,
+						'size': 0x60000
+					}
+				}
+			}
 		}
 	},
 	{
@@ -23,10 +41,28 @@ ECU_IDENTIFICATION_TABLE = [
 			'name': 'SIMK43 2.0 4mbit',
 			'eeprom_size_bytes': 524288, # (512 KiB)
 			'bin_offset': -0x80000,
-			'calibration_section_address': 0x90000,
-			'calibration_size_bytes': 0x10000, # 65536 bytes (64 KiB)
-			'program_section_address': 0xA0000,
-			'program_section_size': 0x60000
+			'regions': {
+				'calibration': {
+					'read': {
+						'address': 0x90000,
+						'size': 0x10000, # 65536 bytes (64 KiB)
+					},
+					'write': {
+						'address': 0x90000,
+						'size': 0x10000
+					}
+				},
+				'program': {
+					'read': {
+						'address': 0xA0000,
+						'size': 0x60000
+					},
+					'write': {
+						'address': 0xA0000,
+						'size': 0x60000
+					}
+				}
+			}
 		},
 	},
 	{
@@ -36,10 +72,28 @@ ECU_IDENTIFICATION_TABLE = [
 			'name': 'SIMK43 V6 4mbit (5WY17)',
 			'eeprom_size_bytes': 524288, # (512 KiB)
 			'bin_offset': -0x80000,
-			'calibration_section_address': 0x88000,
-			'calibration_size_bytes': 0x5F40,
-			'program_section_address': 0x90000,
-			'program_section_size': 0x70000
+			'regions': {
+				'calibration': {
+					'read': {
+						'address': 0x88000,
+						'size': 0x5F40
+					},
+					'write': {
+						'address': 0x88000,
+						'size': 0x5F40
+					}
+				},
+				'program': {
+					'read': {
+						'address': 0x90000,
+						'size': 0x70000
+					},
+					'write': {
+						'address': 0x90000,
+						'size': 0x70000
+					}
+				}
+			}
 		}
 	},
 		{
@@ -49,10 +103,28 @@ ECU_IDENTIFICATION_TABLE = [
 			'name': 'SIMK43 V6 4mbit (5WY18+)',
 			'eeprom_size_bytes': 524288, # (512 KiB)
 			'bin_offset': -0x80000,
-			'calibration_section_address': 0x88000,
-			'calibration_size_bytes': 0x6EFF, # there is some readable but non-writable section after this
-			'program_section_address': 0x90000,
-			'program_section_size': 0x70000
+			'regions': {
+				'calibration': {
+					'read': {
+						'address': 0x88000,
+						'size': 0x6EFF, # there is some readable but non-writable section after this
+					},
+					'write': {
+						'address': 0x88000,
+						'size': 0x6EFF, # there is some readable but non-writable section after this
+					}
+				},
+				'program': {
+					'read': {
+						'address': 0x90000,
+						'size': 0x70000
+					},
+					'write': {
+						'address': 0x90000,
+						'size': 0x70000
+					}
+				}
+			}
 		}
 	},
 	{
@@ -62,10 +134,28 @@ ECU_IDENTIFICATION_TABLE = [
 			'name': 'SIMK41 / V6 2mbit',
 			'eeprom_size_bytes': 262144, # (256 KiB)
 			'bin_offset': -0x40000,
-			'calibration_section_address': 0x48000,
-			'calibration_size_bytes': 0x8000, # 32,768 bytes (32 KiB)
-			'program_section_address': 0x50000, 
-			'program_section_size': 0x30000
+			'regions': {
+				'calibration': {
+					'read': {
+						'address': 0x48000,
+						'size': 0x8000, # 32,768 bytes (32 KiB)
+					},
+					'write': {
+						'address': 0x48000,
+						'size': 0x8000, # 32,768 bytes (32 KiB)
+					}
+				},
+				'program': {
+					'read': {
+						'address': 0x50000,
+						'size': 0x30000
+					},
+					'write': {
+						'address': 0x50000,
+						'size': 0x30000
+					}
+				}
+			}
 		}
 	},
 	{
@@ -75,10 +165,28 @@ ECU_IDENTIFICATION_TABLE = [
 			'name': 'SIMK43 2.0 4mbit (Sonata)',
 			'eeprom_size_bytes': 524288, # (512 KiB)
 			'bin_offset': -0x80000,
-			'calibration_section_address': 0x88000,
-			'calibration_size_bytes': 0x5FF8, # yes, this is correct. this is a 4mbit ecu with a calibration zone smaller than 2mbit ecus. i dont know either
-			'program_section_address': 0x90000,
-			'program_section_size': 0x70000
+			'regions': {
+				'calibration': {
+					'read': {
+						'address': 0x88000,
+						'size': 0x5FF8, # yes, this is correct. this is a 4mbit ecu with a calibration zone smaller than 2mbit ecus. i dont know either
+					},
+					'write': {
+						'address': 0x88000,
+						'size': 0x5FF8, # yes, this is correct. this is a 4mbit ecu with a calibration zone smaller than 2mbit ecus. i dont know either
+					}
+				},
+				'program': {
+					'read': {
+						'address': 0x90000,
+						'size': 0x70000
+					},
+					'write': {
+						'address': 0x90000,
+						'size': 0x70000
+					}
+				}
+			}
 		}
 	},
 	{
@@ -88,10 +196,28 @@ ECU_IDENTIFICATION_TABLE = [
 			'name': 'SIMK2K (Elantra 2.0 Beta)',
 			'eeprom_size_bytes': 524288,
 			'bin_offset': -0x80000,
-			'calibration_section_address': 0x92000,
-			'calibration_size_bytes': 0xCF00,
-			'program_section_address': 0xA0000,
-			'program_section_size': 0x60000
+			'regions': {
+				'calibration': {
+					'read': {
+						'address': 0x90000,
+						'size': 0xEF00
+					},
+					'write': {
+						'address': 0x92000,
+						'size': 0xCF00
+					}
+				},
+				'program': {
+					'read': {
+						'address': 0xA0000,
+						'size': 0x60000
+					},
+					'write': {
+						'address': 0xA0000,
+						'size': 0x60000
+					}
+				}
+			}
 		}
 	},
 ]

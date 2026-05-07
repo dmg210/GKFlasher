@@ -70,15 +70,22 @@ class DesiredBaudrate:
 	index: int
 	baudrate: int
 
+@dataclass
+class RegionOffsets:
+	address: int
+	size: int
+
+@dataclass
+class Region:
+	read: RegionOffsets
+	write: RegionOffsets
+
 class ECU:
 	# static vars block, probably should be uppercase'd
 	name: str
 	eeprom_size_bytes: int
 	bin_offset: int
-	calibration_section_address: int
-	calibration_size_bytes: int
-	program_section_address: int
-	program_section_size: int
+	regions: dict
 
 	bus: kwp2000.Kwp2000Protocol
 	desired_baudrate: DesiredBaudrate
@@ -89,14 +96,12 @@ class ECU:
 		name: str, 
 		eeprom_size_bytes: int,
 		bin_offset: int,
-		calibration_section_address: int, calibration_size_bytes: int,
-		program_section_address: int, program_section_size: int
+		regions: dict
 		):
 		self.name = name
 		self.eeprom_size_bytes = eeprom_size_bytes
 		self.bin_offset = bin_offset
-		self.calibration_section_address, self.calibration_size_bytes = calibration_section_address, calibration_size_bytes
-		self.program_section_address, self.program_section_size = program_section_address, program_section_size
+		self.regions = regions
 		self.desired_baudrate = DesiredBaudrate(index=None, baudrate=10400)
 
 	def get_name (self) -> str:
@@ -105,17 +110,15 @@ class ECU:
 	def get_eeprom_size_bytes (self) -> int:
 		return self.eeprom_size_bytes
 
-	def get_calibration_section_address (self) -> int:
-		return self.calibration_section_address
-
-	def get_calibration_size_bytes (self) -> int:
-		return self.calibration_size_bytes
-
-	def get_program_section_address (self) -> int:
-		return self.program_section_address
-
-	def get_program_section_size (self) -> int:
-		return self.program_section_size
+	def get_region (self, name: str) -> Region:
+		return Region(
+			read=RegionOffsets(
+				**self.regions[name]['read']
+			),
+			write=RegionOffsets(
+				**self.regions[name]['write']
+			)
+		)
 
 	def set_bus (self, bus: kwp2000.Kwp2000Protocol) -> Self:
 		self.bus = bus
@@ -195,11 +198,11 @@ class ECU:
 		return True
 
 	def get_calibration (self) -> str:
-		calibration = self.bus.execute(kwp2000.commands.ReadMemoryByAddress(offset=self.get_calibration_section_address(), size=8)).get_data()
+		calibration = self.bus.execute(kwp2000.commands.ReadMemoryByAddress(offset=self.get_region('calibration').read.address, size=8)).get_data()
 		return ''.join([chr(x) for x in list(calibration)])
 
 	def get_calibration_description (self) -> str:
-		description = self.bus.execute(kwp2000.commands.ReadMemoryByAddress(offset=self.get_calibration_section_address()+0x40, size=8)).get_data()
+		description = self.bus.execute(kwp2000.commands.ReadMemoryByAddress(offset=self.get_region('calibration').read.address+0x40, size=8)).get_data()
 		return ''.join([chr(x) for x in list(description)])
 
 	def read_memory_by_address (self, offset: int, size: int) -> bytes:

@@ -1,6 +1,6 @@
 # GKFlasher
 
-CLI flashing tool for SIMK41/43-based vehicles. This project is a result of research gathered by black-box reverse engineering.
+CLI flashing tool for SIMK41/SIMK43/SIM2K based vehicles. This project is a result of research gathered by black-box reverse engineering.
 
 It can read & write ecu calibration data / program code, correct EEPROM checksums, clear adaptive values and program the immobilizer. It also provides BSL support for your ECU.
 
