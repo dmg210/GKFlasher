@@ -11,6 +11,8 @@ from ecu_definitions import ECU_IDENTIFICATION_TABLE, BAUDRATES, Routine, Reprog
 from flasher.logging import logger, logger_raw
 from flasher.immo import cli_immo, cli_immo_info
 from flasher.lineswap import generate_sie, generate_bin
+from flasher.rsw import rsw_handler
+from flasher.mtos import mtos_handler
 from _version import __version__
 
 def strip (string):
@@ -187,6 +189,13 @@ def load_arguments ():
 	parser.add_argument('-c', '--config', help='Config filename', default='gkflasher.yml')
 	parser.add_argument('-v', '--verbose', action='count', default=0)
 	parser.add_argument('--immo', action='store_true')
+	parser.add_argument('--rsw-boot1', help='Flash Boot1 using RSW bootstrap')
+	parser.add_argument('--rsw-boot2', help='Flash Boot2 using RSW bootstrap')
+	parser.add_argument('--rsw-asw', help='Flash ASW using RSW bootstrap')
+	parser.add_argument('--rsw-cal', help='Flash CAL using RSW bootstrap')
+	parser.add_argument('--rsw-full', help='Flash full image set using RSW bootstrap')
+	parser.add_argument('--rsw-virginize', help='Virginize ECU using RSW bootstrap')
+	parser.add_argument('--mtos',  help='Mini Test Operating System', action='store_true')
 	args = parser.parse_args()
 
 	logging_levels = [logging.WARNING, logging.INFO, logging.DEBUG]
@@ -364,6 +373,26 @@ def main(bus: kwp2000.Kwp2000Protocol, args):
 	if (args.logger):
 		logger(ecu)
 
+	if (args.rsw_boot1):
+		rsw_handler(ecu, mode='boot1', bin_file=args.rsw_boot1)
+
+	if (args.rsw_boot2):
+		rsw_handler(ecu, mode='boot2', bin_file=args.rsw_boot2)
+
+	if (args.rsw_asw):
+		rsw_handler(ecu, mode='asw', bin_file=args.rsw_asw)
+
+	if (args.rsw_cal):
+		rsw_handler(ecu, mode='cal', bin_file=args.rsw_cal)
+
+	if (args.rsw_full):
+		rsw_handler(ecu, mode='full', bin_file=args.rsw_full)
+
+	if (args.rsw_virginize):
+		rsw_handler(ecu, mode='virginize', bin_file=args.rsw_virginize)
+
+	if (args.mtos):
+		mtos_handler(ecu)
 	bus.close()
 
 def packet2hex (packet: RawPacket) -> str:
@@ -402,3 +431,4 @@ if __name__ == '__main__':
 		print('\n'.join([packet2hex(packet) for packet in bus.transport.buffer_dump()]))
 		print('\n[!] Shutting down due to an exception in the main thread. For exception details, see above')
 	bus.close()
+	os._exit(0)
