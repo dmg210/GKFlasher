@@ -11,6 +11,26 @@ ECU_IDENTIFICATION_TABLE = [
 			'eeprom_size_bytes': 1048576, # (1024 KiB)
 			'bin_offset': 0,
 			'regions': {
+				'boot1': {
+					'read': {
+						'address': 0x80000,
+						'size': 0x4000
+					},
+					'write': {
+						'address': 0x80000,
+						'size': 0x4000
+					}
+				},
+				'boot2': {
+					'read': {
+						'address': 0x88000,
+						'size': 0x8000
+					},
+					'write': {
+						'address': 0x88000,
+						'size': 0x8000
+					}
+				},
 				'calibration': {
 					'read': {
 						'address': 0x90000,
@@ -42,6 +62,26 @@ ECU_IDENTIFICATION_TABLE = [
 			'eeprom_size_bytes': 524288, # (512 KiB)
 			'bin_offset': -0x80000,
 			'regions': {
+				'boot1': {
+					'read': {
+						'address': 0x80000,
+						'size': 0x4000
+					},
+					'write': {
+						'address': 0x80000,
+						'size': 0x4000
+					}
+				},
+				'boot2': {
+					'read': {
+						'address': 0x88000,
+						'size': 0x8000
+					},
+					'write': {
+						'address': 0x88000,
+						'size': 0x8000
+					}
+				},
 				'calibration': {
 					'read': {
 						'address': 0x90000,
