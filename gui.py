@@ -21,6 +21,7 @@ from gkflasher import strip
 from _version import __version__
 from flasher.lineswap import generate_sie, generate_bin
 from flasher.smartra import calculate_smartra_pin
+from flasher.rsw import rsw_handler
 
 #
 # @TODO: ... man, I don't even know. Start by separating this mess into controllers and views?
@@ -50,15 +51,46 @@ except Exception as e:
 	print('[!] Couldn\'t create or set the log file: {}'.format(str(e)))
 
 class Progress(object):
-	def __init__ (self, progress_callback, max_value: int):
+
+	def __init__(self, progress_callback, max_value: int):
+
 		self.progress_callback = progress_callback
-		self.progress_callback.emit((max_value, 0))
+		self.max_value = max_value
+		self.current_value = 0
+
+		self.progress_callback.emit((100, 0))
 		self.progress_callback.emit((0,))
 
-	def __call__ (self, value: int):
-		self.progress_callback.emit((value,))
+	def __call__(self, value: int):
 
-	def title (self, title: str):
+		# ==========================================
+		# DIRECT PERCENTAGE MODE
+		# Used by rsw.py and bsl.py
+		# ==========================================
+
+		if self.max_value == 100:
+
+			percent = value
+
+		# ==========================================
+		# INCREMENTAL MODE
+		# Used for flashing with memory.py
+		# ==========================================
+
+		else:
+
+			self.current_value += value
+
+			percent = int(
+				(self.current_value / self.max_value) * 100
+			)
+
+		if percent > 100:
+			percent = 100
+
+		self.progress_callback.emit((percent,))
+
+	def title(self, title: str):
 		pass
 
 class WorkerSignals(QObject):
@@ -115,6 +147,8 @@ class Ui(QtWidgets.QMainWindow):
 		super(Ui, self).__init__()
 		self.load_ui()
 		self.previous_baudrate = False
+		self.interfacesBox.currentIndexChanged.connect(self.update_baudrate_state)
+		self.update_baudrate_state()
 		self.log_signal.connect(self.log)  # Connect the signal to the `log` method
 
 		# Configure bsl logging for GUI
@@ -183,6 +217,7 @@ class Ui(QtWidgets.QMainWindow):
 		self.flashingFileBtn.clicked.connect(self.handler_select_file_flashing)
 		self.checksumFileBtn.clicked.connect(self.handler_select_file_checksum)
 		self.bslFileBtn.clicked.connect(self.handler_select_bsl_file)
+		self.rswFileBtn.clicked.connect(self.select_rsw_file)
 
 		self.immoInfoBtn.clicked.connect(lambda: self.click_handler(self.display_immo_information))
 		self.limpHomeModeBtn.clicked.connect(lambda: self.click_handler(self.limp_home))
@@ -198,6 +233,12 @@ class Ui(QtWidgets.QMainWindow):
 		self.bslReadIntRomBtn.clicked.connect(lambda: self.click_handler(self.bslReadIntRom))
 		self.bslReadExtFlashBtn.clicked.connect(lambda: self.click_handler(self.bslReadExtFlash))
 		self.bslWriteExtFlashBtn.clicked.connect(lambda: self.click_handler(self.bslWriteExtFlash))
+
+		self.rswBSWBtn.clicked.connect(lambda: self.click_handler(self.rsw_flash_bsw))
+		self.rswASWBtn.clicked.connect(lambda: self.click_handler(self.rsw_flash_asw))
+		self.rswCALBtn.clicked.connect(lambda: self.click_handler(self.rsw_flash_cal))
+		self.rswFullBtn.clicked.connect(lambda: self.click_handler(self.rsw_flash_full))
+		self.rswVirginizeBtn.clicked.connect(lambda: self.click_handler(self.rsw_virginize))
 
 	def click_handler (self, callback):
 		worker = Worker(callback)
@@ -238,7 +279,12 @@ class Ui(QtWidgets.QMainWindow):
 		self.bslOutput.setReadOnly(True)
 
 	def detect_interfaces(self):
-		devices = KLineHardware.available_ports()
+		devices = []
+		for hw in (KLineHardware, CanHardware):
+			try:
+				devices.extend(hw.available_ports())
+			except Exception:
+				pass
 		if (len(devices) == 0):
 			raise ValueError
 		for device in devices:
@@ -254,11 +300,29 @@ class Ui(QtWidgets.QMainWindow):
 		for index, baudrate in BAUDRATES.items():
 			self.baudratesBox.addItem('{} baud'.format(baudrate), index)
 
+	def load_baudrates (self):
+		self.baudratesBox.addItem('Desired baudrate (default)', -1)
+		for index, baudrate in BAUDRATES.items():
+			self.baudratesBox.addItem('{} baud'.format(baudrate), index)
+
+	def update_baudrate_state(self):
+		interface_name = self.interfacesBox.currentData()
+
+		is_can = self.is_can_interface(interface_name)
+
+		self.baudratesBox.setEnabled(not is_can)
+
+		if is_can:
+			self.baudratesBox.setCurrentIndex(0)	
+
 	def get_interface_url (self):
 		url = self.interfacesBox.currentData()
 		if not url:
 			raise IndexError
 		return url
+
+	def is_can_interface(self, interface_name: str) -> bool:
+		return str(interface_name).upper().startswith("PCAN_")
 
 	def get_desired_baudrate (self) -> DesiredBaudrate:
 		baudrate_index = self.baudratesBox.currentData()
@@ -267,12 +331,12 @@ class Ui(QtWidgets.QMainWindow):
 			return DesiredBaudrate(index=None, baudrate=10400)
 		return DesiredBaudrate(index=baudrate_index, baudrate=BAUDRATES[baudrate_index])
 
-	def progress_callback (self, value):
-		if (len(value) > 1):
+	def progress_callback(self, value):
+		if len(value) > 1:
 			self.progressBar.setMaximum(value[0])
 			self.progressBar.setValue(0)
 		else:
-			self.progressBar.setValue(self.progressBar.value()+value[0])
+			self.progressBar.setValue(value[0])
 
 	def _close_bus (self, log_callback) -> None:
 		if hasattr(self, 'bus'):
@@ -293,8 +357,14 @@ class Ui(QtWidgets.QMainWindow):
 		config = yaml.safe_load(open(os.path.dirname(os.path.abspath(__file__)) + '/gkflasher.yml'))
 		del config['kline']['interface']
 
-		hardware = KLineHardware(self.get_interface_url())
-		transport = Kwp2000OverKLineTransport(hardware, tx_id=config['kline']['tx_id'], rx_id=config['kline']['rx_id'])
+		interface = self.get_interface_url()
+
+		if self.is_can_interface(interface):
+			hardware = CanHardware(interface)
+			transport = Kwp2000OverCanTransport(hardware, tx_id=config['canbus']['tx_id'], rx_id=config['canbus']['rx_id'])	
+		else:
+			hardware = KLineHardware(interface)
+			transport = Kwp2000OverKLineTransport(hardware, tx_id=config['kline']['tx_id'], rx_id=config['kline']['rx_id'])	
 
 		self.bus = kwp2000.Kwp2000Protocol(transport)
 		self.bus.init(StartCommunication(), keepalive_command=TesterPresent(ResponseType.REQUIRED), keepalive_delay=2)
@@ -470,10 +540,9 @@ class Ui(QtWidgets.QMainWindow):
 			log_callback.emit('[*] Uploading data to the ECU')
 			write_memory(ecu, payload, flash_start, flash_size, progress_callback=Progress(progress_callback, flash_size))
 
-		progress_callback.emit((99, 100))
-
 		ecu.bus.transport.hardware.set_timeout(300)
 		log_callback.emit('[*] start routine 0x02 (verify blocks and mark as ready to execute)')
+		progress_callback.emit((40,))
 		try:
 			ecu.bus.execute(StartRoutineByLocalIdentifier(Routine.VERIFY_BLOCKS.value))
 		except kwp2000.Kwp2000NegativeResponseException as e:
@@ -484,7 +553,7 @@ class Ui(QtWidgets.QMainWindow):
 			log_callback.emit('[!] Your ECU is now soft-bricked. There\'s no need to panic, all you need to do is flash a valid file.')
 			return
 
-		progress_callback.emit((100, 100))
+		progress_callback.emit((100,))
 		log_callback.emit('[*] ecu reset')
 		log_callback.emit('[*] Done!')
 		self.send_notification('Flashing finished', 'Turn off your ignition for 10 seconds')
@@ -1364,6 +1433,82 @@ class Ui(QtWidgets.QMainWindow):
 	def sie_to_bin_conversion(self):
 		filename = self.checksumFileInput.text()
 		generate_bin(filename=filename)
+
+	def get_rsw_logger(self, log_callback=None):
+
+		if log_callback:
+			return log_callback
+
+		class Logger:
+			def emit(_, msg):
+				self.log(msg)
+
+		return Logger()
+
+	def select_rsw_file(self):
+
+		filename, _ = QFileDialog.getOpenFileName(
+			self,
+			"Select BIN File",
+			"",
+			"BIN Files (*.bin)"
+		)
+
+		if filename:
+			self.rswFileInput.setText(filename)
+
+	# ==========================================================
+	# GENERIC RSW HANDLER
+	# ==========================================================
+
+	def run_rsw(self, mode, log_callback=None, progress_callback=None):
+
+		log_callback = self.get_rsw_logger(log_callback)
+
+		ecu = self.initialize_ecu(log_callback)
+
+		if ecu == False:
+
+			self._close_bus(log_callback)
+			return
+
+		filename = self.rswFileInput.text().strip()
+
+		if mode != 'virginize':
+			if not filename:
+
+				log_callback.emit('[!] No BIN file selected')
+
+				self.disconnect_ecu(ecu)
+
+				return
+
+		try:
+			rsw_handler(ecu, mode=mode, bin_file=filename, log_callback=log_callback, progress_callback=progress_callback)
+
+		except Exception as e:
+
+			log_callback.emit(f'[!] RSW flash failed: {str(e)}')
+
+		self.disconnect_ecu(ecu)
+
+	# ==========================================================
+	# BUTTON HANDLERS
+	# ==========================================================
+	def rsw_flash_bsw(self, progress_callback=None, log_callback=None):
+		self.run_rsw('bsw', log_callback=log_callback, progress_callback=progress_callback)
+
+	def rsw_flash_asw(self, progress_callback=None, log_callback=None):
+		self.run_rsw('asw', log_callback=log_callback, progress_callback=progress_callback)
+
+	def rsw_flash_cal(self, progress_callback=None, log_callback=None):
+		self.run_rsw('cal', log_callback=log_callback, progress_callback=progress_callback)
+
+	def rsw_flash_full(self, progress_callback=None, log_callback=None):
+		self.run_rsw('full', log_callback=log_callback, progress_callback=progress_callback)
+
+	def rsw_virginize(self, progress_callback=None, log_callback=None):
+		self.run_rsw('virginize', log_callback=log_callback, progress_callback=progress_callback)
 
 def packet2hex (packet: RawPacket) -> str:
 	direction = 'Incoming' if packet.direction == PacketDirection.INCOMING else 'Outgoing'
