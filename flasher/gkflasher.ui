@@ -583,6 +583,159 @@
      </property>
     </widget>
    </widget>
+   <widget class="QWidget" name="tab_rsw">
+    <attribute name="title">
+     <string>RSW</string>
+    </attribute>
+    <widget class="QPushButton" name="rswFileBtn">
+     <property name="geometry">
+      <rect>
+       <x>10</x>
+       <y>10</y>
+       <width>80</width>
+       <height>23</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Select file..</string>
+     </property>
+     <property name="flat">
+      <bool>false</bool>
+     </property>
+    </widget>
+    <widget class="QLineEdit" name="rswFileInput">
+     <property name="geometry">
+      <rect>
+       <x>100</x>
+       <y>10</y>
+       <width>661</width>
+       <height>22</height>
+      </rect>
+     </property>
+    </widget>
+    <widget class="QPushButton" name="rswBSWBtn">
+     <property name="geometry">
+      <rect>
+       <x>10</x>
+       <y>40</y>
+       <width>231</width>
+       <height>23</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Flash BSW</string>
+     </property>
+    </widget>
+    <widget class="QPushButton" name="rswASWBtn">
+     <property name="geometry">
+      <rect>
+       <x>10</x>
+       <y>70</y>
+       <width>231</width>
+       <height>23</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Flash ASW</string>
+     </property>
+    </widget>
+    <widget class="QPushButton" name="rswCALBtn">
+     <property name="geometry">
+      <rect>
+       <x>10</x>
+       <y>100</y>
+       <width>231</width>
+       <height>23</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Flash CAL</string>
+     </property>
+    </widget>
+    <widget class="QPushButton" name="rswFullBtn">
+     <property name="geometry">
+      <rect>
+       <x>260</x>
+       <y>40</y>
+       <width>231</width>
+       <height>23</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Full Flash</string>
+     </property>
+    </widget>
+    <widget class="QPushButton" name="rswVirginizeBtn">
+ <property name="geometry">
+  <rect>
+   <x>260</x>
+   <y>70</y>
+   <width>231</width>
+   <height>23</height>
+  </rect>
+ </property>
+ <property name="text">
+  <string>Virginize</string>
+ </property>
+</widget>
+   </widget>
+   <widget class="QWidget" name="tab_mtos">
+    <attribute name="title">
+     <string>MTOS</string>
+    </attribute>
+    <widget class="QPushButton" name="mtosFileBtn">
+     <property name="geometry">
+      <rect>
+       <x>10</x>
+       <y>10</y>
+       <width>80</width>
+       <height>23</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Select file..</string>
+     </property>
+     <property name="flat">
+      <bool>false</bool>
+     </property>
+    </widget>
+    <widget class="QLineEdit" name="mtosFileInput">
+     <property name="geometry">
+      <rect>
+       <x>100</x>
+       <y>10</y>
+       <width>661</width>
+       <height>22</height>
+      </rect>
+     </property>
+    </widget>
+    <widget class="QPushButton" name="mtosUploadBtn">
+     <property name="geometry">
+      <rect>
+       <x>10</x>
+       <y>40</y>
+       <width>231</width>
+       <height>23</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Upload MTOS</string>
+     </property>
+    </widget>
+    <widget class="QPushButton" name="mtosExecBtn">
+     <property name="geometry">
+      <rect>
+       <x>10</x>
+       <y>70</y>
+       <width>231</width>
+       <height>23</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Execute MTOS</string>
+     </property>
+    </widget>
+   </widget>
    <widget class="QWidget" name="about">
     <attribute name="title">
      <string>About</string>
