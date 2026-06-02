@@ -1,3 +1,3 @@
 #placeholder
-def mtos_handler:
-  return
+def mtos_handler ():
+    return
