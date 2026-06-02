@@ -6,3 +6,4 @@ PyYAML==6.0.2
 sip==6.10.0
 typing_extensions==4.12.2
 plyer==2.1.0
+python-can==4.6.1
