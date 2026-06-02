@@ -1468,7 +1468,6 @@ class Ui(QtWidgets.QMainWindow):
 		ecu = self.initialize_ecu(log_callback)
 
 		if ecu == False:
-
 			self._close_bus(log_callback)
 			return
 
@@ -1489,6 +1488,7 @@ class Ui(QtWidgets.QMainWindow):
 		except Exception as e:
 
 			log_callback.emit(f'[!] RSW flash failed: {str(e)}')
+			self._close_bus(log_callback)
 
 		self.disconnect_ecu(ecu)
 
