@@ -42,6 +42,7 @@ Running the command `pip list` should show the following packages
 -pyusb
 -PyYAML
 -setuptools
+-python-can
 
 ## Usage 
 
@@ -117,6 +118,20 @@ This behaviour is followed by default by GKFlasher's --read command.
 `--bin-to-sie {input filename}` - Convert BIN to SIE for (Chip-off) Flashing
 
 `--sie-to-bin {input filename}` - Convert SIE to BIN after (Chip-off) Flashing
+
+`--mtos {input filename}` - Mini Test Operating System
+
+`--rsw-boot1 {input filename}` - Flash Boot1 using RSW bootstrap
+
+`--rsw-boot2 {input filename}` - Flash Boot2 using RSW bootstrap
+
+`--rsw-asw {input filename}` - Flash ASW using RSW bootstrap
+
+`--rsw-cal {input filename}` - Flash CAL using RSW bootstrap
+
+`--rsw-full {input filename}` - Flash full image set using RSW bootstrap
+
+`--rsw-virginize` - Virginize ECU using RSW bootstrap
 
 `--immo` - Immobilizer functions
 

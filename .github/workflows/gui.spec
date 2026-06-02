@@ -11,6 +11,7 @@ hiddenimports += collect_submodules('plyer')
 #hiddenimports += collect_submodules('about-time')
 #hiddenimports += collect_submodules('grapheme')
 #hiddenimports += collect_submodules('alive_progress')
+hiddenimports += collect_submodules('can')
 
 a = Analysis(
     ['..\\..\\gui.py'],
