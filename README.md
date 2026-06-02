@@ -42,6 +42,7 @@ Running the command `pip list` should show the following packages
 -pyusb
 -PyYAML
 -setuptools
+-python-can
 
 ## Usage 
 
