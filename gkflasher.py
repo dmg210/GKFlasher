@@ -196,6 +196,8 @@ def load_arguments ():
 	parser.add_argument('--rsw-full', help='Flash full image set using RSW bootstrap')
 	parser.add_argument('--rsw-virginize', help='Virginize ECU using RSW bootstrap')
 	parser.add_argument('--mtos',  help='Mini Test Operating System', action='store_true')
+	parser.add_argument('--mtos-payload', help='BIN file to use for MTOS (full dump)')
+	parser.add_argument('--mtos-key', help='Key to use for Siemens access level', type=lambda x: int(x,0))
 	args = parser.parse_args()
 
 	logging_levels = [logging.WARNING, logging.INFO, logging.DEBUG]
@@ -392,7 +394,7 @@ def main(bus: kwp2000.Kwp2000Protocol, args):
 		rsw_handler(ecu, mode='virginize', bin_file=args.rsw_virginize)
 
 	if (args.mtos):
-		mtos_handler(ecu)
+		mtos_handler(ecu, args.mtos_payload, args.mtos_key)
 	bus.close()
 
 def packet2hex (packet: RawPacket) -> str:
