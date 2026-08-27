@@ -1,4 +1,4 @@
-import argparse, time, yaml, logging, sys, os, traceback
+import argparse, time, yaml, logging, sys, os, traceback, re
 from datetime import datetime
 from alive_progress import alive_bar
 from gkbus.hardware import KLineHardware, CanHardware, OpeningPortException, TimeoutException
@@ -13,6 +13,7 @@ from flasher.immo import cli_immo, cli_immo_info
 from flasher.lineswap import generate_sie, generate_bin
 from flasher.rsw import rsw_handler
 from flasher.mtos import mtos_handler
+from flasher.m797 import m797_flash, m797_read_flash, M797_IMAGE_SIZE
 from _version import __version__
 
 def strip (string):
@@ -161,6 +162,346 @@ def cli_read_dtcs (ecu):
 	for dtc, status in dtcs.items():
 		print('[*] DTC: P{} ({})'.format(f"{dtc:04x}", bin(status)))
 
+
+# ============================================================================
+# Kefico/Bosch M7.9.7 support
+#
+# Everything above this block is the stock SIMK implementation.  M7.9.7 is
+# routed out before the stock SIMK diagnostic-session/security/identification
+# path starts.
+# ============================================================================
+
+ECU_FAMILY_SIMK = 'simk'
+ECU_FAMILY_M797 = 'm797'
+ECU_FAMILY_UNKNOWN = 'unknown'
+
+M797_ECU_IDENTIFICATION_PARAMETERS = [
+	{'value': 0x90, 'name': 'Calibration Identifier'},
+	{'value': 0x91, 'name': 'vehicleManufacturerECUHardwareNumber'},
+	{'value': 0x92, 'name': 'systemSupplierECUHardwareNumber'},
+	{'value': 0x93, 'name': 'systemSupplierECUHardwareVersionNumber'},
+	{'value': 0x94, 'name': 'systemSupplierECUSoftwareNumber'},
+	{'value': 0x95, 'name': 'systemSupplierECUSoftwareVersionNumber'},
+	{'value': 0x96, 'name': 'exhaustRegulationOrTypeApprovalNumber'},
+	{'value': 0x97, 'name': 'systemNameOrEngineType'},
+	{'value': 0x98, 'name': 'repairShopCodeOrTesterSerialNumber'},
+	{'value': 0x99, 'name': 'programmingDate'},
+	{'value': 0x9A, 'name': 'calibrationRepairShopCodeOrCalibrationEquipment'},
+	{'value': 0x9B, 'name': 'calibrationDate'},
+	{'value': 0x9C, 'name': 'calibrationEquipmentSoftwareNumber'},
+	{'value': 0x9D, 'name': 'ECUInstallationDate'},
+]
+
+
+def _m797_meaningful_identification_payload(response, identifier: int) -> bool:
+	"""Reject filler/blank positive responses such as SIMK's all-FF IDs."""
+	data = bytes(response)
+
+	if data and data[0] == identifier:
+		data = data[1:]
+
+	if not data:
+		return False
+
+	# Erased/unimplemented local identifiers observed on SIMK answer with
+	# positive SID but contain only 00/FF (occasionally spaces).
+	meaningful = bytes(
+		value for value in data
+		if value not in (0x00, 0x20, 0xFF)
+	)
+
+	return len(meaningful) >= 2
+
+
+def detect_ecu_family(bus: kwp2000.Kwp2000Protocol) -> str:
+	"""
+	Non-destructive early family detection before any SIMK-specific setup.
+
+	M7.9.7 is identified by multiple positive supplier/hardware/software ID
+	records.  Do not silently classify communication failure as SIMK: return
+	UNKNOWN so programming operations cannot accidentally enter the SIMK path.
+	"""
+	positive_ids = 0
+
+	for identifier in (0x91, 0x92, 0x93, 0x94, 0x95):
+		try:
+			response = bus.execute(
+				kwp2000.commands.ReadEcuIdentification(identifier)
+			).get_data()
+
+			if _m797_meaningful_identification_payload(response, identifier):
+				positive_ids += 1
+				if positive_ids >= 2:
+					return ECU_FAMILY_M797
+		except (kwp2000.Kwp2000NegativeResponseException, TimeoutException):
+			continue
+
+	return ECU_FAMILY_UNKNOWN
+
+
+def cli_choose_ecu_family() -> str | None:
+	print('[!] Unable to identify ECU family automatically.')
+	print('[*] This can happen when an ECU is soft-bricked but its programming bootloader is still alive.')
+	print('    [0] SIMK')
+	print('    [1] Kefico/Bosch M7.9.7')
+
+	try:
+		choice = input('ECU family or any other key to abort: ').strip()
+	except (EOFError, KeyboardInterrupt):
+		return None
+
+	if choice == '0':
+		return ECU_FAMILY_SIMK
+	if choice == '1':
+		return ECU_FAMILY_M797
+
+	print('[!] Aborting..')
+	return None
+
+
+def fetch_m797_ecu_identification(bus):
+	values = {}
+
+	for parameter in M797_ECU_IDENTIFICATION_PARAMETERS:
+		try:
+			value = bus.execute(
+				kwp2000.commands.ReadEcuIdentification(parameter['value'])
+			).get_data()
+		except kwp2000.Kwp2000NegativeResponseException:
+			continue
+
+		values[parameter['value']] = {
+			'name': parameter['name'],
+			'value': bytes(value[1:])
+		}
+
+	return values
+
+
+def cli_m797_id(bus: kwp2000.Kwp2000Protocol):
+	print('[*] Reading Kefico/Bosch M7.9.7 ECU Identification')
+
+	for parameter_key, parameter in fetch_m797_ecu_identification(bus).items():
+		value = parameter['value']
+		value_hex = ' '.join('{:02X}'.format(x) for x in value)
+		value_ascii = ''.join(
+			chr(x) if 0x20 <= x <= 0x7E else '.'
+			for x in value
+		).rstrip()
+
+		print('')
+		print('    [*] [0x{:02X}] {}:'.format(
+			parameter_key,
+			parameter['name']
+		))
+		print('            [HEX]: {}'.format(value_hex))
+		print('            [ASCII]: {}'.format(value_ascii))
+
+	print('')
+
+
+def cli_m797_read_dtcs(bus: kwp2000.Kwp2000Protocol):
+	print('[*] Reading Kefico/Bosch M7.9.7 diagnostic trouble codes')
+
+	dtcs_raw = bus.execute(
+		kwp2000.commands.ReadDTCsByStatus(
+			kwp2000.enums.DtcStatus.REQUEST_IDENTIFIED_DTC_AND_STATUS,
+			kwp2000.enums.DtcGroup.ALL
+		)
+	).get_data()
+
+	if not dtcs_raw:
+		print('[!] ECU returned an empty DTC response')
+		return
+
+	dtc_amount = dtcs_raw[0]
+	print('[*] Amount of DTCs: {}'.format(dtc_amount))
+
+	for x in range(dtc_amount):
+		offset = 1 + (x * 3)
+
+		if offset + 3 > len(dtcs_raw):
+			print('[!] DTC response is shorter than expected')
+			break
+
+		dtc = int.from_bytes(
+			dtcs_raw[offset:offset + 2],
+			byteorder='big'
+		)
+		status = dtcs_raw[offset + 2]
+
+		print('[*] DTC: P{:04X}, Status: 0x{:02X}'.format(
+			dtc,
+			status
+		))
+
+
+def _sanitize_m797_filename_component(value: str) -> str:
+	value = value.strip().strip('\x00')
+	value = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', value)
+	value = re.sub(r'\s+', '_', value)
+	return value.strip(' ._')
+
+
+def get_m797_calibration_id(bus: kwp2000.Kwp2000Protocol) -> str:
+	response = bus.execute(
+		kwp2000.commands.ReadEcuIdentification(0x90)
+	).get_data()
+
+	data = bytes(response)
+	if data and data[0] == 0x90:
+		data = data[1:]
+
+	calibration = data.decode('ascii', errors='ignore').strip().strip('\x00')
+
+	if not calibration:
+		raise RuntimeError('M7.9.7 calibration ID 0x90 was blank')
+
+	return calibration
+
+
+def get_m797_engine_id(bus: kwp2000.Kwp2000Protocol) -> str:
+	response = bus.execute(
+		kwp2000.commands.ReadEcuIdentification(0x97)
+	).get_data()
+
+	data = bytes(response)
+	if data and data[0] == 0x97:
+		data = data[1:]
+
+	engine_id = data.decode('ascii', errors='ignore').strip().strip('\x00')
+
+	if not engine_id:
+		raise RuntimeError('M7.9.7 engine ID 0x97 was blank')
+
+	return engine_id.title()
+
+
+def make_m797_read_filename(
+		calibration_id: str,
+		engine_id: str | None = None
+	) -> str:
+	calibration = _sanitize_m797_filename_component(
+		calibration_id
+	) or 'M797'
+
+	if engine_id:
+		engine = _sanitize_m797_filename_component(engine_id)
+		if engine:
+			return '{}_{}.bin'.format(calibration, engine)
+
+	return '{}.bin'.format(calibration)
+
+
+def handle_m797(bus: kwp2000.Kwp2000Protocol, args):
+	"""
+	M7.9.7-only command dispatcher.
+
+	This function returns to main() before any of the stock SIMK
+	StartDiagnosticSession / SecurityAccess / identify_ecu logic executes.
+	"""
+	print('[*] Found! Kefico/Bosch M7.9.7')
+
+	if args.id:
+		cli_m797_id(bus)
+
+	if args.read_dtcs:
+		cli_m797_read_dtcs(bus)
+
+	if args.read:
+		calibration_id = 'UNKNOWN'
+
+		try:
+			print('[*] Reading M7.9.7 calibration identifier (0x90)')
+			calibration_id = get_m797_calibration_id(bus)
+			print('[+] Detected calibration: {}'.format(calibration_id))
+		except Exception as exc:
+			print('[!] Calibration identifier 0x90 unavailable: {}'.format(exc))
+			print('[*] Continuing with calibration-agnostic read probing.')
+
+		engine_id = None
+
+		try:
+			print('[*] Reading M7.9.7 engine identifier (0x97)')
+			engine_id = get_m797_engine_id(bus)
+			print('[+] Detected engine: {}'.format(engine_id))
+		except Exception as exc:
+			print('[!] Engine identifier 0x97 unavailable: {}'.format(exc))
+
+		output_filename = (
+			args.output
+			if args.output
+			else make_m797_read_filename(calibration_id, engine_id)
+		)
+
+		print('[*] Output file: {}'.format(output_filename))
+
+		read_progress = None
+		if getattr(args, 'gui_progress', False):
+			progress_state = {'done': 0, 'percent': -1}
+
+			def read_progress(delta):
+				progress_state['done'] += int(delta)
+				percent = min(100, int(
+					(progress_state['done'] * 100) / M797_IMAGE_SIZE
+				))
+				if percent != progress_state['percent']:
+					progress_state['percent'] = percent
+					print('@@M797_PROGRESS {}@@'.format(percent), flush=True)
+
+		m797_read_flash(
+			bus,
+			calibration_id=calibration_id,
+			output_filename=output_filename,
+			progress_callback=read_progress,
+			read_profile=getattr(args, 'm797_read_profile', None)
+		)
+
+	if args.flash:
+		flash_progress = None
+		if getattr(args, 'gui_progress', False):
+			progress_state = {'done': 0, 'percent': -1}
+
+			def flash_progress(delta):
+				progress_state['done'] += int(delta)
+				percent = min(100, int(
+					(progress_state['done'] * 100) / M797_IMAGE_SIZE
+				))
+				if percent != progress_state['percent']:
+					progress_state['percent'] = percent
+					print('@@M797_PROGRESS {}@@'.format(percent), flush=True)
+
+		m797_flash(
+			bus,
+			args.flash,
+			programming_profile=getattr(args, 'm797_programming_profile', None),
+			confirm=not getattr(args, 'm797_gui_confirmed', False),
+			progress_callback=flash_progress
+		)
+
+	unsupported = []
+
+	if args.flash_calibration:
+		unsupported.append('--flash-calibration')
+	if args.flash_program:
+		unsupported.append('--flash-program')
+	if args.read_calibration:
+		unsupported.append('--read-calibration')
+	if args.read_program:
+		unsupported.append('--read-program')
+	if args.immo:
+		unsupported.append('--immo')
+	if args.clear_adaptive_values:
+		unsupported.append('--clear-adaptive-values')
+	if args.logger:
+		unsupported.append('--logger')
+
+	if unsupported:
+		print('[!] Not yet supported on M7.9.7: {}'.format(
+			', '.join(unsupported)
+		))
+
+
 def load_config (config_filename):
 	return yaml.safe_load(open('gkflasher.yml'))
 
@@ -170,10 +511,15 @@ def load_arguments ():
 	parser.add_argument('-i', '--interface')
 	parser.add_argument('-b', '--baudrate', type=int)
 	parser.add_argument('--desired-baudrate', type=lambda x: int(x,0))
+	parser.add_argument('--ecu-family', choices=['auto', ECU_FAMILY_SIMK, ECU_FAMILY_M797], default='auto', help='Force ECU family detection. Useful for M7.9.7 recovery.')
 	parser.add_argument('-f', '--flash', help='Filename to full flash')
 	parser.add_argument('--flash-calibration', help='Filename to flash calibration zone from')
 	parser.add_argument('--flash-program', help='Filename to flash program zone from')
 	parser.add_argument('-r', '--read', action='store_true')
+	parser.add_argument('--gui-progress', action='store_true', help=argparse.SUPPRESS)
+	parser.add_argument('--m797-read-profile', choices=['standard', 'fast'], default=None, help='M7.9.7 bulk read speed profile.')
+	parser.add_argument('--m797-programming-profile', choices=['standard', 'fast'], default=None, help='M7.9.7 full-flash programming speed profile.')
+	parser.add_argument('--m797-gui-confirmed', action='store_true', help=argparse.SUPPRESS)
 	parser.add_argument('--read-calibration', action='store_true')
 	parser.add_argument('--read-program', action='store_true')
 	parser.add_argument('--read-dtcs', action='store_true')
@@ -226,6 +572,148 @@ def initialize_bus (protocol: str, protocol_config: dict) -> kwp2000.Kwp2000Prot
 
 	return bus
 
+
+# Known Hyundai/Kia/Kefico K-Line application target addresses.
+# Keep the configured address first so normal SIMK setups connect immediately.
+M797_KLINE_TARGET_ADDRESSES = (
+	0x11,
+	0x17,
+	0x0E,
+	0x0F,
+)
+M797_KLINE_PROBE_TIMEOUT = 0.30
+M797_KLINE_NORMAL_TIMEOUT = 12
+M797_KLINE_PROBE_RETRY_DELAY = 0.10
+M797_KLINE_SCAN_PASSES = 2
+M797_KLINE_KEEPALIVE_DELAY = 1.5
+
+
+def _unique_kline_targets(configured_target: int):
+	targets = []
+	for target in (configured_target, *M797_KLINE_TARGET_ADDRESSES):
+		if target not in targets:
+			targets.append(target)
+	return targets
+
+
+def _start_communication(bus: kwp2000.Kwp2000Protocol, probe: bool = False):
+	"""Start KWP communication; probe mode deliberately has no keepalive."""
+	if probe:
+		result = bus.init(kwp2000.commands.StartCommunication())
+	else:
+		result = bus.init(
+			kwp2000.commands.StartCommunication(),
+			keepalive_command=kwp2000.commands.TesterPresent(
+				kwp2000.enums.ResponseType.REQUIRED
+			),
+			keepalive_delay=M797_KLINE_KEEPALIVE_DELAY
+		)
+	bus.transport.set_buffer_size(20)
+	return result
+
+
+def _set_kline_target(bus: kwp2000.Kwp2000Protocol, target: int) -> None:
+	transport = bus.transport
+	updated = False
+	for attribute in ('tx_id', '_tx_id'):
+		if hasattr(transport, attribute):
+			setattr(transport, attribute, target)
+			updated = True
+	if not updated:
+		raise AttributeError('Kwp2000OverKLineTransport does not expose a mutable tx_id')
+
+
+def _prepare_next_kline_probe(bus) -> None:
+	if hasattr(bus, '_stop_keepalive'):
+		try:
+			bus._stop_keepalive()
+		except Exception:
+			pass
+
+	socket = getattr(bus.transport.hardware, 'socket', None)
+	if socket is not None:
+		try:
+			socket.reset_input_buffer()
+		except Exception:
+			pass
+		try:
+			socket.reset_output_buffer()
+		except Exception:
+			pass
+
+
+def initialize_connected_bus(protocol: str, protocol_config: dict) -> kwp2000.Kwp2000Protocol:
+	"""
+	Open communication and validate the physical K-Line target with a real KWP
+	response before family detection.  bus.init() alone is not sufficient proof
+	of a valid target with the GKBus K-Line fast-init implementation.
+	"""
+	if protocol != 'kline':
+		bus = initialize_bus(protocol, protocol_config)
+		_start_communication(bus)
+		return bus
+
+	configured_target = protocol_config['tx_id']
+	targets = _unique_kline_targets(configured_target)
+	last_exception = None
+
+	print('[*] Probing K-Line ECU target address')
+
+	initial_config = dict(protocol_config)
+	initial_config['tx_id'] = targets[0]
+	bus = initialize_bus('kline', initial_config)
+
+	for scan in range(M797_KLINE_SCAN_PASSES):
+		if scan:
+			print('[*] Retrying K-Line target scan')
+
+		for target in targets:
+			print('[*] Trying K-Line target 0x{:02X}'.format(target))
+			try:
+				_prepare_next_kline_probe(bus)
+				_set_kline_target(bus, target)
+
+				# Physical fast-init + StartCommunication, but no background keepalive
+				# until the address has been validated.
+				_start_communication(bus, probe=True)
+				bus.transport.hardware.set_timeout(M797_KLINE_PROBE_TIMEOUT)
+
+				# Require an actual ECU response. A wrong address can otherwise look
+				# like a successful fast-init in GKBus.
+				bus.execute(
+					kwp2000.commands.TesterPresent(
+						kwp2000.enums.ResponseType.REQUIRED
+					)
+				)
+				bus.transport.hardware.set_timeout(M797_KLINE_NORMAL_TIMEOUT)
+
+				# Restart once in normal mode to install the standard keepalive.
+				_prepare_next_kline_probe(bus)
+				_set_kline_target(bus, target)
+				_start_communication(bus, probe=False)
+
+				print('[+] K-Line ECU responded at target address 0x{:02X}'.format(target))
+				return bus
+
+			except Exception as exc:
+				last_exception = exc
+				try:
+					if getattr(bus.transport.hardware, 'socket', None) is not None:
+						bus.transport.hardware.set_timeout(M797_KLINE_PROBE_TIMEOUT)
+				except Exception:
+					pass
+				time.sleep(M797_KLINE_PROBE_RETRY_DELAY)
+
+	try:
+		bus.close()
+	except Exception:
+		pass
+
+	raise RuntimeError(
+		'K-Line StartCommunication failed at all target addresses: {}'
+		.format(', '.join('0x{:02X}'.format(target) for target in targets))
+	) from last_exception
+
 def cli_choose_ecu ():
 	print('[!] Failed to identify your ECU!')
 	print('[*] If you know what you\'re doing (like trying to revive a soft bricked ECU), you can choose your ECU from the list below:')
@@ -263,8 +751,29 @@ def cli_identify_ecu (bus: kwp2000.Kwp2000Protocol):
 	return ecu
 
 def main(bus: kwp2000.Kwp2000Protocol, args):
-	bus.init(kwp2000.commands.StartCommunication(), keepalive_command=kwp2000.commands.TesterPresent(kwp2000.enums.ResponseType.REQUIRED), keepalive_delay=1.5)
-	bus.transport.set_buffer_size(20)
+	# StartCommunication and K-Line target validation are completed before main().
+	if isinstance(bus.transport, Kwp2000OverKLineTransport):
+		if args.ecu_family != 'auto':
+			ecu_family = args.ecu_family
+			print('[*] ECU family forced to {}'.format(ecu_family))
+		else:
+			print('[*] Detecting ECU family...')
+			ecu_family = detect_ecu_family(bus)
+
+			if ecu_family == ECU_FAMILY_UNKNOWN:
+				# Never silently route an unidentified full-flash request into the
+				# SIMK programming path. Non-programming commands preserve the old
+				# fallback behavior.
+				if args.flash or args.flash_calibration or args.flash_program:
+					ecu_family = cli_choose_ecu_family()
+					if ecu_family is None:
+						return
+				else:
+					ecu_family = ECU_FAMILY_SIMK
+
+		if ecu_family == ECU_FAMILY_M797:
+			handle_m797(bus, args)
+			return
 
 	if args.desired_baudrate:
 		try:
@@ -357,7 +866,7 @@ def main(bus: kwp2000.Kwp2000Protocol, args):
 		cli_read_eeprom(ecu, eeprom_size, address_start=ecu.get_region('calibration').read.address, address_stop=ecu.get_region('calibration').read.address+ecu.get_region('calibration').read.size, output_filename=args.output)
 	if (args.read_program):
 		address_start = ecu.get_region('program').read.address
-		address_stop = address_start+ecu.get_region('program').read.address
+		address_stop = address_start+ecu.get_region('program').read.size
 		cli_read_eeprom(ecu, eeprom_size, address_start=address_start, address_stop=address_stop, output_filename=args.output)
 	if (args.read_dtcs):
 		cli_read_dtcs(ecu)
@@ -420,17 +929,32 @@ if __name__ == '__main__':
 		sys.exit()
 	
 	print('[*] Selected protocol: {}. Initializing..'.format(GKFlasher_config['protocol']))
-	bus = initialize_bus(GKFlasher_config['protocol'], GKFlasher_config[GKFlasher_config['protocol']])	
+	bus = None
+	exit_code = 0
 
 	try:
+		bus = initialize_connected_bus(
+			GKFlasher_config['protocol'],
+			GKFlasher_config[GKFlasher_config['protocol']]
+		)
 		main(bus, args)
 	except KeyboardInterrupt:
-		pass
+		exit_code = 130
 	except Exception:
+		exit_code = 1
 		print('\n\n[!] Exception in main thread!')
 		print(traceback.format_exc())
-		print('[*] Dumping buffer:\n')
-		print('\n'.join([packet2hex(packet) for packet in bus.transport.buffer_dump()]))
+		if bus is not None:
+			try:
+				print('[*] Dumping buffer:\n')
+				print('\n'.join([packet2hex(packet) for packet in bus.transport.buffer_dump()]))
+			except Exception:
+				pass
 		print('\n[!] Shutting down due to an exception in the main thread. For exception details, see above')
-	bus.close()
-	os._exit(0)
+	finally:
+		if bus is not None:
+			try:
+				bus.close()
+			except Exception:
+				pass
+	os._exit(exit_code)
