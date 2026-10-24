@@ -22,12 +22,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-    'tkinter',
-    '_tkinter',
-    'FixTk',
-    'tcl',
-    'tk',
+    excludes=['tkinter'],
     noarchive=False,
     #optimize=0,
 )
