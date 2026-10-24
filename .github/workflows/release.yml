@@ -74,6 +74,20 @@ jobs:
               throw "Could not find the expected shutdown line. Check the installed python-can version."
           }
 
+      - name: Verify gs_usb patch before packaging
+        shell: pwsh
+        run: |
+          $module = python -c "import can.interfaces.gs_usb; print(can.interfaces.gs_usb.__file__)"
+          Write-Host "Installed module: $module"
+      
+          Select-String -Path $module -Pattern "dispose_resources"
+      
+          Write-Host "=== PyInstaller archive contents ==="
+          pyi-archive_viewer -l dist\gui\gui.exe |
+            Select-String "gs_usb|can.interfaces"
+
+
+
       - name: Build EXE Package
         run: |
           python -m PyInstaller .github/workflows/gui.spec
