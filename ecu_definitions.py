@@ -267,7 +267,9 @@ BAUDRATES = {
 	0x02: 20000,
 	0x03: 40000,
 	0x04: 60000,
-	0x05: 120000
+	0x05: 120000,
+	0x64: 57600,
+	0x82: 108800
 }
 
 class ReprogrammingStatus(WordBitfield):
