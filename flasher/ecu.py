@@ -5,7 +5,7 @@ from typing import Self
 from gkbus.protocol import kwp2000
 from gkbus.channel import KLineChannel, KLineTiming
 from gkbus.exceptions import TimeoutException
-from flasher.rsw import log
+from flasher.utils import log
 from ecu_definitions import (
     ECU_IDENTIFICATION_TABLE,
     IOIdentifier,
@@ -399,43 +399,46 @@ def detect_ecu_family(bus: kwp2000.Kwp2000Protocol) -> str:
         return ECU_FAMILY_UNKNOWN
 
 
-def display_m797_identification(bus: kwp2000.Kwp2000Protocol, log_callback=None):
-    log('[*] Reading Kefico/Bosch M7.9.7 ECU Identification', log_callback)
-
-    for parameter_key, parameter in fetch_ecu_identification(bus, M797_ECU_IDENTIFICATION_PARAMETERS).items():
+def display_identification(bus, parameters=None, log_callback=None):
+    log('[*] Reading ECU Identification', log_callback)
+    for identifier, parameter in fetch_ecu_identification(bus, parameters).items():
         value = parameter['value']
-        value_hex = ' '.join('{:02X}'.format(x) for x in value)
-        value_ascii = ''.join(
-            chr(x) if 0x20 <= x <= 0x7E else '.'
-            for x in value
-        ).rstrip()
-
-        log('    [*] [0x{:02X}] {}:'.format(
-            parameter_key,
-            parameter['name']
-        ), log_callback)
-        log('            [HEX]: {}'.format(value_hex), log_callback)
-        log('            [ASCII]: {}'.format(value_ascii), log_callback)
+        log('    [*] [0x{:02X}] {}:'.format(identifier, parameter['name']), log_callback)
+        log('            [HEX]: {}'.format(value.hex(' ').upper()), log_callback)
+        text = ''.join(chr(byte) if 0x20 <= byte <= 0x7E else '.' for byte in value).rstrip()
+        log('            [ASCII]: {}'.format(text), log_callback)
 
 
-
-def display_m797_dtcs(bus: kwp2000.Kwp2000Protocol, log_callback=None):
-    log('[*] Reading Kefico/Bosch M7.9.7 diagnostic trouble codes', log_callback)
+def fetch_dtcs(bus, group=kwp2000.enums.DtcGroup.POWERTRAIN):
     data = bus.execute(kwp2000.commands.ReadDTCsByStatus(
-        kwp2000.enums.DtcStatus.REQUEST_IDENTIFIED_DTC_AND_STATUS,
-        kwp2000.enums.DtcGroup.ALL,
+        kwp2000.enums.DtcStatus.REQUEST_IDENTIFIED_DTC_AND_STATUS, group,
     )).get_data()
     if not data:
-        log('[!] ECU returned an empty DTC response', log_callback)
+        raise ValueError('ECU returned an empty DTC response')
+    if len(data) < 1 + data[0] * 3:
+        raise ValueError('DTC response is shorter than expected')
+    return [(int.from_bytes(data[offset:offset + 2], 'big'), data[offset + 2])
+            for offset in range(1, 1 + data[0] * 3, 3)]
+
+
+def display_dtcs(bus, group=kwp2000.enums.DtcGroup.POWERTRAIN, log_callback=None):
+    log('[*] Reading diagnostic trouble codes', log_callback)
+    try:
+        dtcs = fetch_dtcs(bus, group)
+    except ValueError as exc:
+        log('[!] {}'.format(exc), log_callback)
         return
-    log('[*] Amount of DTCs: {}'.format(data[0]), log_callback)
-    for offset in range(1, 1 + data[0] * 3, 3):
-        if offset + 3 > len(data):
-            log('[!] DTC response is shorter than expected', log_callback)
-            break
-        dtc = int.from_bytes(data[offset:offset + 2], 'big')
-        status = data[offset + 2]
-        log('[*] DTC: P{:04X}, Status: 0x{:02X}'.format(dtc, status), log_callback)
+    log('[*] Amount of DTCs: {}'.format(len(dtcs)), log_callback)
+    for code, status in dtcs:
+        log('[*] DTC: P{:04X}, Status: 0x{:02X}'.format(code, status), log_callback)
+
+
+def display_m797_identification(bus, log_callback=None):
+    return display_identification(bus, M797_ECU_IDENTIFICATION_PARAMETERS, log_callback)
+
+
+def display_m797_dtcs(bus, log_callback=None):
+    return display_dtcs(bus, kwp2000.enums.DtcGroup.ALL, log_callback)
 
 
 def _sanitize_m797_filename_component(value: str) -> str:

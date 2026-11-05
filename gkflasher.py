@@ -1,15 +1,15 @@
-import argparse, time, yaml, logging, sys, os, traceback
-from datetime import datetime
-from alive_progress import alive_bar
+import argparse, yaml, logging, sys, traceback
 from gkbus.device import Bus, DeviceABC, discover, find_device
 from gkbus.exceptions import DeviceException, GkbusException, TimeoutException
-from gkbus.transport import Kwp2000OverKLineTransport, Kwp2000OverCanTransport, RawPacket, PacketDirection
+from gkbus.transport import Kwp2000OverKLineTransport, RawPacket, PacketDirection
 from gkbus.protocol import kwp2000
-from flasher.memory import read_memory, write_memory, dynamic_find_end
+from flasher.simk import SimkOperations
+from flasher.connection import open_connection, close_connection
 from flasher.ecu import (
     ECU,
     identify_ecu,
-    fetch_ecu_identification,
+    display_identification,
+    display_dtcs,
     enable_security_access,
     negotiate_timing,
     release_timing,
@@ -28,8 +28,6 @@ from ecu_definitions import (
     ECU_IDENTIFICATION_TABLE,
     KEFICO_LAYOUT,
     BAUDRATES,
-    Routine,
-    ReprogrammingStatus,
     AccessLevel,
     ECU_FAMILY_SIMK,
     ECU_FAMILY_M797,
@@ -37,7 +35,7 @@ from ecu_definitions import (
     M797_FLASH_START,
     M797_FLASH_END,
 )
-from flasher.logging import logger, logger_raw
+from flasher.logging import logger
 from flasher.immo import cli_immo, cli_immo_info
 from flasher.lineswap import generate_sie, generate_bin
 from flasher.rsw import rsw_handler
@@ -46,151 +44,33 @@ from flasher import bsl
 from flasher.kernel import KERNEL_TIMING
 from _version import __version__
 
-def strip (string):
-	return ''.join(x for x in string if x.isalnum())
-
-def cli_read_eeprom (ecu: ECU, eeprom_size: int, address_start: int = None, address_stop: int = None, escalate_privileges: bool = False, output_filename: str = None):
-	if escalate_privileges:
-		print('[*] Attempting privilege escalation with the IOCLID patch')
-		if (ecu.security_access(AccessLevel.SIEMENS_0xFD)):
-			print('[*] Success!')
-		else:
-			print('[!] Patch likely not present, failed to escalate privileges.')
-			print('    Read will only include the calibration and program zones.')
-			print('    If you\'re running ca663056, feel encouraged to apply the IOCLID patch.')
-			print('    It will allow you to read the whole memory over OBD2, just like BSL.')
-			print('    You can find it at https://github.com/OpenGK-org/opengk-simk')
-
-	if (address_start == None):
-		address_start = abs(ecu.bin_offset)
-	if (address_stop == None):
-		address_stop = address_start+eeprom_size
-
-	print('[*] Reading from {} to {}'.format(hex(address_start), hex(address_stop)))
-
-	requested_size = address_stop-address_start
-	eeprom = bytearray([0xFF]*eeprom_size)
-
-	with alive_bar(requested_size, unit='B') as bar:
-		fetched = read_memory(ecu, address_start=address_start, address_stop=address_stop, progress_callback=bar)
-
-	eeprom_start = ecu.calculate_bin_offset(address_start)
-	eeprom_end = eeprom_start + len(fetched)
-	eeprom[eeprom_start:eeprom_end] = fetched
-
-	if (output_filename == None):
-		try:
-			calibration = ecu.get_calibration()
-			description = ecu.get_calibration_description()
-			hw_rev_c = strip(''.join([chr(x) for x in list(ecu.bus.execute(kwp2000.commands.ReadEcuIdentification(0x8c)).get_data())[1:]]))
-			hw_rev_d = strip(''.join([chr(x) for x in list(ecu.bus.execute(kwp2000.commands.ReadEcuIdentification(0x8d)).get_data())[1:]]))
-			output_filename = "{}_{}_{}_{}_{}.bin".format(description, calibration, hw_rev_c, hw_rev_d, datetime.now().strftime('%Y-%m-%d_%H%M'))
-		except: # dirty
-			output_filename = "output_{}_to_{}.bin".format(hex(address_start), hex(address_stop))
-
-	with open (output_filename, "wb") as file:
-		file.write(bytes(eeprom))
-
-	print('[*] saved to {}'.format(output_filename))
-
-	print('[*] Done!')
-
-def cli_flash_eeprom (ecu, input_filename, flash_calibration=True, flash_program=True):
-	print('\n[*] Loading up {}'.format(input_filename))
-
-	with open(input_filename, 'rb') as file:
-		eeprom = file.read()
-
-	print('[*] Loaded {} bytes'.format(len(eeprom)))
-
-	if (input('[?] Ready to flash! Do you wish to continue? [y/n]: ') != 'y'):
-		print('[!] Aborting!')
-		return
-
-	if flash_program:
-		print('[*] start routine 0x00 (erase program code section)')
-		ecu.bus.execute(kwp2000.commands.StartRoutineByLocalIdentifier(Routine.ERASE_PROGRAM.value))
+def cli_read_eeprom(ecu, address_start=None, address_stop=None,
+                    escalate_privileges=False, output_filename=None):
+    return SimkOperations(ecu).read(address_start, address_stop, escalate_privileges, output_filename)
 
 
-		# we need to start 16 bytes later as the program section starts with a flag that we can't write
-		payload_start = ecu.calculate_bin_offset(ecu.get_region('program').write.address) + 16
-		payload_stop = payload_start + dynamic_find_end(eeprom[payload_start:(payload_start+ecu.get_region('program').write.size-16)])
-		payload = eeprom[payload_start:payload_stop]
+def cli_flash_eeprom(ecu, input_filename, flash_calibration=True, flash_program=True):
+    print('[*] Loading up {}'.format(input_filename))
+    with open(input_filename, 'rb') as source:
+        image = source.read()
+    print('[*] Loaded {} bytes'.format(len(image)))
+    operations = SimkOperations(ecu)
+    operations.plan_flash(image, flash_calibration, flash_program)
+    if input('[?] Ready to flash! Do you wish to continue? [y/n]: ') != 'y':
+        print('[!] Aborting!')
+        return
+    operations.flash(image, flash_calibration, flash_program)
 
-		flash_start = ecu.get_region('program').write.size + 16
-		flash_size = payload_stop-payload_start
 
-		with alive_bar(flash_size, unit='B') as bar:
-			write_memory(ecu, payload, flash_start, flash_size, progress_callback=bar)
-
-	if flash_calibration:
-		print('[*] start routine 0x01 (erase calibration section)')
-		ecu.bus.execute(kwp2000.commands.StartRoutineByLocalIdentifier(Routine.ERASE_CALIBRATION.value))
-
-		payload_start = ecu.calculate_bin_offset(ecu.get_region('calibration').write.address)
-		# we need to shave 16 bytes off the top as this is where a flag that we can't write is located
-		payload_stop = payload_start + dynamic_find_end(eeprom[payload_start:(payload_start+ecu.get_region('calibration').write.size-16)])
-		payload = eeprom[payload_start:payload_stop]
-
-		flash_start = ecu.calculate_memory_write_offset(ecu.get_region('calibration').write.address)
-		flash_size = payload_stop-payload_start
-
-		with alive_bar(flash_size, unit='B') as bar:
-			write_memory(ecu, payload, flash_start, flash_size, progress_callback=bar)
-
-	ecu.bus.transport.set_timeout(300)
-
-	print('[*] start routine 0x02 (verify blocks and mark as ready to execute)')
-	try:
-		ecu.bus.execute(kwp2000.commands.StartRoutineByLocalIdentifier(Routine.VERIFY_BLOCKS.value))
-	except kwp2000.Kwp2000NegativeResponseException as e:
-		print('[*] Verifying blocks failed! Did you forget to correct the checksum?')
-		print('[*] Fetching detailed reprogramming status..')
-		reprogramming_status_response = ecu.bus.execute(
-			kwp2000.commands.StartRoutineByLocalIdentifier(
-				Routine.CHECK_REPROGRAMMING_STATUS.value
-			)
-		).get_data()[1:]
-
-		reprogramming_status = ReprogrammingStatus(int.from_bytes(reprogramming_status_response, 'big'))
-
-		print(str(reprogramming_status))
-
-		print('[!] Your ECU is now soft-bricked. There\'s no need to panic, all you need to do is flash a valid file.')
-
-	ecu.bus.transport.set_timeout(12)
-
-	print('[*] ecu reset')
-	print('[*] done!')
-	ecu.bus.execute(kwp2000.commands.ECUReset(kwp2000.enums.ResetMode.POWER_ON_RESET)).get_data()
-	ecu.bus.close()
-	
 def cli_clear_adaptive_values (ecu):
 	print('[*] Clearing adaptive values.. ', end='')
 	ecu.clear_adaptive_values()
 	print('Done! Turn off ignition for 10 seconds to apply changes.')
 
 def cli_read_dtcs (ecu):
-	print('[*] Reading diagnostic trouble codes')
 	ecu.bus.execute(kwp2000.commands.StartDiagnosticSession(kwp2000.enums.DiagnosticSession.DEFAULT, ecu.get_desired_baudrate().index))
 
-	dtcs_raw = ecu.bus.execute(
-		kwp2000.commands.ReadDTCsByStatus(
-			kwp2000.enums.DtcStatus.REQUEST_IDENTIFIED_DTC_AND_STATUS,
-			kwp2000.enums.DtcGroup.POWERTRAIN
-		)
-	).get_data()
-
-	dtc_amount = dtcs_raw[0]
-	print('[*] Amount of DTCs: {}'.format(dtc_amount))
-	dtcs = {}
-	for x in range(dtc_amount):
-		dtc = int.from_bytes(dtcs_raw[1:][(x * 3):(x * 3) + 2])
-		dtc_status = dtcs_raw[1:][(x * 3) + 2]
-		dtcs[dtc] = dtc_status
-
-	for dtc, status in dtcs.items():
-		print('[*] DTC: P{} ({})'.format(f"{dtc:04x}", bin(status)))
+	display_dtcs(ecu.bus)
 
 def cli_choose_ecu_family() -> str | None:
     print('[!] Unable to identify ECU family automatically.')
@@ -281,7 +161,8 @@ def handle_m797(bus: kwp2000.Kwp2000Protocol, args):
         )
 
 def load_config (config_filename):
-	return yaml.safe_load(open('gkflasher.yml'))
+	with open(config_filename, 'r') as source:
+		return yaml.safe_load(source)
 
 def load_arguments ():
 	parser = argparse.ArgumentParser(prog='GKFlasher v{}'.format(__version__))
@@ -377,18 +258,7 @@ def initialize_bus (protocol: str, protocol_config: dict) -> tuple[DeviceABC, kw
 	device = select_device(protocol_config['interface'], bus_type)
 	print('[*] Interface: {}'.format(device.description()))
 
-	if bus_type == Bus.CANBUS:
-		channel = device.canbus(protocol_config['bitrate'])
-		transport = Kwp2000OverCanTransport(channel, tx_id=protocol_config['tx_id'], rx_id=protocol_config['rx_id'])
-	else:
-		channel = device.kline()
-		transport = Kwp2000OverKLineTransport(channel, tx_id=protocol_config['tx_id'], rx_id=protocol_config['rx_id'])
-
-	# opened here rather than by the transport, so the channel outlives the KWP2000 session
-	# (RSW switches to CCP on it). Closed by device.close()
-	channel.open()
-
-	return device, kwp2000.Kwp2000Protocol(transport)
+	return device, open_connection(device, bus_type, protocol_config)
 
 def cli_choose_ecu ():
 	print('[!] Failed to identify your ECU!')
@@ -521,30 +391,18 @@ def main(bus: kwp2000.Kwp2000Protocol, args):
 		return cli_immo(ecu)
 
 	if (args.id):
-		print('[*] Reading ECU Identification..',end='')
-		for parameter_key, parameter in fetch_ecu_identification(bus).items():
-			value_dec = list(parameter['value'])
-			value_hex = ' '.join([hex(x) for x in value_dec])
-			value_ascii = strip(''.join([chr(x) for x in value_dec]))
-
-			print('')
-			print('    [*] [{}] {}:'.format(hex(parameter_key), parameter['name']))
-			print('            [HEX]: {}'.format(value_hex))
-			print('            [ASCII]: {}'.format(value_ascii))
-			print('')
-
+		display_identification(bus)
 		cli_immo_info(ecu)
 
-	eeprom_size = ecu.get_eeprom_size_bytes()
 
 	if (args.read):
-		cli_read_eeprom(ecu, eeprom_size, address_start=args.address_start, address_stop=args.address_stop, escalate_privileges=True, output_filename=args.output)
+		cli_read_eeprom(ecu, address_start=args.address_start, address_stop=args.address_stop, escalate_privileges=True, output_filename=args.output)
 	if (args.read_calibration):
-		cli_read_eeprom(ecu, eeprom_size, address_start=ecu.get_region('calibration').read.address, address_stop=ecu.get_region('calibration').read.address+ecu.get_region('calibration').read.size, output_filename=args.output)
+		cli_read_eeprom(ecu, address_start=ecu.get_region('calibration').read.address, address_stop=ecu.get_region('calibration').read.address+ecu.get_region('calibration').read.size, output_filename=args.output)
 	if (args.read_program):
 		address_start = ecu.get_region('program').read.address
-		address_stop = address_start+ecu.get_region('program').read.address
-		cli_read_eeprom(ecu, eeprom_size, address_start=address_start, address_stop=address_stop, output_filename=args.output)
+		address_stop = address_start+ecu.get_region('program').read.size
+		cli_read_eeprom(ecu, address_start=address_start, address_stop=address_stop, output_filename=args.output)
 	if (args.read_dtcs):
 		cli_read_dtcs(ecu)
 
@@ -588,7 +446,6 @@ def main(bus: kwp2000.Kwp2000Protocol, args):
 		mtos_handler(ecu, args.mtos_key, mode=args.mtos_mode,
 			payload_filename=args.mtos_payload, address=mtos_address, length=mtos_length,
 			output_filename=args.output, attach_hint=mtos_attach_hint(args))
-	bus.close()
 
 def mtos_attach_hint (args) -> str:
 	'''
@@ -649,7 +506,8 @@ def packet2hex (packet: RawPacket) -> str:
 	parsed = 'RawPacket({}, ts={}, data={})'.format(direction, packet.timestamp, data)
 	return parsed
 
-if __name__ == '__main__':
+def cli():
+	global GKFlasher_config
 	GKFlasher_config, args = load_arguments()
 
 	print('[*] GKFlasher v{}'.format(__version__))
@@ -667,8 +525,7 @@ if __name__ == '__main__':
 
 	if args.bsl:
 		code = bsl_main(args)
-		sys.stdout.flush()
-		os._exit(code)
+		return code
 	
 	print('[*] Selected protocol: {}. Initializing..'.format(GKFlasher_config['protocol']))
 	try:
@@ -677,21 +534,29 @@ if __name__ == '__main__':
 		print('[!] Failed to open the interface: {}'.format(e))
 		sys.exit(1)
 
+	exit_code = 0
 	try:
 		if args.mtos and args.mtos_attach:
 			mtos_attach(bus, args)
 		else:
 			main(bus, args)
 	except KeyboardInterrupt:
-		pass
+		exit_code = 130
 	except Exception:
-		print('\n\n[!] Exception in main thread!')
+		exit_code = 1
+		print('[!] Exception in main thread!')
 		print(traceback.format_exc())
-		print('[*] Dumping buffer:\n')
-		print('\n'.join([packet2hex(packet) for packet in bus.transport.buffer_dump()]))
-		print('\n[!] Shutting down due to an exception in the main thread. For exception details, see above')
-	if not args.mtos:
-		release_timing(bus)
-	bus.close()
-	device.close()
-	os._exit(0)
+		print('[*] Dumping buffer:')
+		print('\n'.join(packet2hex(packet) for packet in bus.transport.buffer_dump()))
+	finally:
+		try:
+			if not args.mtos:
+				release_timing(bus)
+		finally:
+			if not close_connection(bus, device):
+				exit_code = 1
+	return exit_code
+
+
+if __name__ == '__main__':
+	sys.exit(cli())

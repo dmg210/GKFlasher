@@ -1,3 +1,4 @@
+from .utils import log
 import os
 import time
 from contextlib import nullcontext
@@ -22,15 +23,6 @@ class Progress(object):
 # LOGGING
 # ==========================================================
 
-def log(message, log_callback=None):
-
-    # GUI mode
-    if log_callback:
-        log_callback.emit(message)
-
-    # CLI mode
-    else:
-        print(message)
 
 # ==========================================================
 # RSW LOADER

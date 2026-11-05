@@ -44,6 +44,14 @@ def tearDownModule():
 
 
 class M797GuiTests(unittest.TestCase):
+    def test_one_hundred_byte_progress_is_incremental(self):
+        signal = Mock()
+        progress = gui.Progress(signal, 100)
+        progress(40)
+        signal.emit.assert_called_with((40,))
+        progress(60)
+        signal.emit.assert_called_with((100,))
+
     def setUp(self):
         self.ui = gui.Ui.__new__(gui.Ui)
         QtWidgets.QMainWindow.__init__(self.ui)
@@ -158,7 +166,7 @@ class M797GuiTests(unittest.TestCase):
                  patch.object(gui, 'get_m797_calibration_id', return_value='DMG_v69'), \
                  patch.object(gui, 'get_m797_engine_id', return_value='Alpha1.3S'), \
                  patch.object(gui, 'm797_read', side_effect=read) as core, \
-                 patch.object(gui, 'read_memory', side_effect=AssertionError('SIMK read')):
+                 patch.object(gui, 'SimkOperations', side_effect=AssertionError('SIMK read')):
                 getattr(self.ui, method)(self.progress, self.log)
                 kwargs = core.call_args.kwargs
                 self.assertEqual((kwargs['address_start'], kwargs['size']), (address, size))
@@ -343,7 +351,7 @@ class M797GuiTests(unittest.TestCase):
         with patch('sys.stdout', None):
             gui.display_m797_dtcs(self.bus, log_callback=self.log)
             self.assertIsNone(gui.sys.stdout)
-        self.assertIn('Reading Kefico/Bosch M7.9.7 diagnostic trouble codes', str(self.log.emit.call_args_list))
+        self.assertIn('Reading diagnostic trouble codes', str(self.log.emit.call_args_list))
 
     def test_checksum_tool_previews_and_saves_full_and_calibration_images(self):
         self.ui.log = Mock()
@@ -382,16 +390,16 @@ class M797GuiTests(unittest.TestCase):
             filename.write_bytes(source)
             self.ui.checksumFileInput.setText(str(filename))
             with patch.object(gui.QMessageBox, 'question', return_value=gui.QMessageBox.Yes), \
-                 patch.object(gui, 'save_m797_checksum_correction', side_effect=OSError('read-only file')):
+                 patch('flasher.checksum.ChecksumCorrection.save', side_effect=OSError('read-only file')):
                 self.ui.correct_checksum()
             self.assertEqual(filename.read_bytes(), source)
-            self.ui.log.assert_any_call('[!] Could not save checksum correction: read-only file')
+            self.ui.log.assert_any_call('[!] Could not correct checksum: read-only file')
 
     def test_checksum_tool_reports_invalid_and_already_correct_files_without_save(self):
         self.ui.log = Mock()
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(gui.QMessageBox, 'question', return_value=gui.QMessageBox.Yes) as dialog, \
-             patch.object(gui, 'save_m797_checksum_correction') as save:
+             patch('flasher.checksum.ChecksumCorrection.save') as save:
             filename = Path(directory) / 'image.bin'
             filename.write_bytes(b'invalid')
             self.ui.checksumFileInput.setText(str(filename))
@@ -420,7 +428,8 @@ class M797GuiTests(unittest.TestCase):
             self.ui.checksumFileInput.setText(str(filename))
             self.ui.correct_checksum()
             expected = bytearray(source)
-            value = gui.checksum(source, 0x10000, 0x10004, 0x1234)
+            from flasher.checksum_simk import checksum
+            value = checksum(source, 0x10000, 0x10004, 0x1234)
             expected[0x17EE0:0x17EE2] = value.to_bytes(2, 'little')
             self.assertEqual(filename.read_bytes(), expected)
             dialog.assert_called_once()

@@ -8,14 +8,13 @@ from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
-from alive_progress import alive_bar
 from gkbus.protocol import kwp2000
 from gkbus.exceptions import TimeoutException
 
 from flasher.ecu import get_m797_calibration_id
 from flasher.m797_reboot import prepare_reboot, reboot
-from flasher.checksum import m797_correct_image_checksums, m797_correct_calibration_checksums
-from flasher.rsw import log # need to relocate
+from flasher.checksum_m797 import m797_correct_image_checksums, m797_correct_calibration_checksums
+from flasher.utils import log, byte_progress as _m797_progress
 from ecu_definitions import (
     KEFICO_LAYOUT,
     M797_IMAGE_SIZE,
@@ -107,21 +106,6 @@ def _m797_stop_keepalive(bus) -> None:
 
 def _page_remaining(address: int) -> int:
     return M797_XC167_PAGE_SIZE - (address & (M797_XC167_PAGE_SIZE - 1))
-
-
-@contextmanager
-def _m797_progress(total: int, title: str, progress_callback=None):
-    """Use alive_progress for the CLI, or a caller-supplied incremental callback."""
-    if progress_callback is None:
-        with alive_bar(
-            total,
-            unit='B',
-            title=title,
-            enrich_print=False
-        ) as bar:
-            yield bar
-    else:
-        yield progress_callback
 
 
 def m797_calculate_key(seed: bytes) -> bytes:

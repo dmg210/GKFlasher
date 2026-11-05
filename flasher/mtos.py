@@ -1,3 +1,4 @@
+from .utils import log
 import struct
 import time
 
@@ -26,13 +27,6 @@ from ecu_definitions import AccessLevel, Routine
 KERNEL_MODES = ('probe', 'read', 'fullflash')
 
 
-def log (message, log_callback=None):
-	# GUI mode
-	if log_callback:
-		log_callback.emit(message)
-	# CLI mode
-	else:
-		print(message)
 
 
 # ---------------------------------------------------------------------------

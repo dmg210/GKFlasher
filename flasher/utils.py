@@ -1,4 +1,27 @@
 from ctypes import Union, LittleEndianStructure, c_uint16
+from contextlib import contextmanager
+from alive_progress import alive_bar
+
+def log(message, log_callback=None):
+    """Print a CLI message or send it through the GUI's log signal."""
+    if log_callback is None:
+        print(message)
+    else:
+        log_callback.emit(message)
+
+
+def strip_identifier(value):
+    return ''.join(character for character in value if character.isalnum())
+
+
+@contextmanager
+def byte_progress(total, title, progress_callback=None):
+    """Use a byte callback supplied by a frontend, or the CLI progress bar."""
+    if progress_callback is not None:
+        yield progress_callback
+    else:
+        with alive_bar(total, unit='B', title=title, enrich_print=False) as bar:
+            yield bar
 
 class WordBitfield(Union):
 	_anonymous_ = ('bits',)
@@ -13,7 +36,11 @@ class WordBitfield(Union):
 	]
 
 	def _to_dict (self) -> dict:
-		return dict((field, getattr(self, field)) for field, _, _ in self.bits._fields_ )
+		fields = getattr(type(self).bits, '_fields_', ())
+		if not fields:
+			return {}
+		bits = type(self).bits.from_buffer(self)
+		return {field: getattr(bits, field) for field, _, _ in fields}
 
 	def __str__ (self) -> str:
 		return '{}(\n{}\n)'.format(

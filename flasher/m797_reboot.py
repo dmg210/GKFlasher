@@ -6,7 +6,7 @@ import time
 
 from gkbus.exceptions import TimeoutException
 from gkbus.protocol import kwp2000
-from flasher.rsw import log # need to relocate
+from flasher.utils import log
 
 _BASE = 0x382800
 _SIZE = 0x500

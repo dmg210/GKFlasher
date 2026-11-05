@@ -2,21 +2,24 @@ import os, sys
 from datetime import datetime
 from functools import partial
 
-import plyer
 from PyQt5 import QtWidgets, uic
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 from PyQt5.QtCore import QThreadPool, QObject, pyqtSignal, QRunnable, pyqtSlot, QTimer
 from plyer import notification
-import gkbus, yaml, traceback, logging
+import yaml, traceback, logging
 from gkbus.device import Bus, DeviceABC, discover
 from gkbus.exceptions import GkbusException, TimeoutException
-from gkbus.transport import Kwp2000OverKLineTransport, Kwp2000OverCanTransport, RawPacket, PacketDirection
+from gkbus.transport import RawPacket, PacketDirection
 from gkbus.protocol import kwp2000
-from gkbus.protocol.kwp2000.commands import *
-from gkbus.protocol.kwp2000.enums import *
+from gkbus.protocol.kwp2000.commands import (
+    StartCommunication, StartDiagnosticSession, StartRoutineByLocalIdentifier,
+    StopCommunication, TesterPresent, WriteDataByLocalIdentifier,
+)
+from gkbus.protocol.kwp2000.enums import DiagnosticSession, ResponseType
 from flasher.ecu import (
     enable_security_access,
-    fetch_ecu_identification,
+    display_identification,
+    display_dtcs,
     identify_ecu,
     negotiate_timing,
     release_timing,
@@ -31,8 +34,9 @@ from flasher.ecu import (
     display_m797_identification,
     display_m797_dtcs,
 )
-from flasher.memory import read_memory, write_memory, dynamic_find_end
-from flasher.checksum import *
+from flasher.simk import SimkOperations
+from flasher.connection import open_connection, close_connection
+from flasher.checksum import prepare_checksum_correction
 from flasher.immo import immo_status
 from ecu_definitions import (
     ECU_IDENTIFICATION_TABLE,
@@ -46,7 +50,6 @@ from ecu_definitions import (
     M797_PROGRAMMING_PROFILES,
     M797_RESPONSE_TIMEOUT,
 )
-from gkflasher import strip
 from _version import __version__
 from flasher.lineswap import generate_sie, generate_bin, set_gui_log_handler as set_lineswap_log_handler
 from flasher.smartra import calculate_smartra_pin
@@ -57,12 +60,6 @@ from flasher.kernel import KERNEL_TIMING
 from flasher.m797 import m797_read, m797_flash, m797_profile_from_selector
 
 BUS_NAMES = {Bus.KLINE: 'K-Line', Bus.CANBUS: 'CAN bus'}
-
-#
-# @TODO: ... man, I don't even know. Start by separating this mess into controllers and views?
-# Ideally, in gkflasher.py break up most of methods that are duplicated here so that 
-# they can be mostly reused. Intercept stdout for rest of them? 
-#
 
 # Set user friendly working directory variable
 if os.name == 'nt':
@@ -87,48 +84,25 @@ except KeyboardInterrupt:
 except Exception as e:
 	print('[!] Couldn\'t create or set the log file: {}'.format(str(e)))
 
-class Progress(object):
+class Progress:
+	"""Convert incremental byte counts into GUI percentages."""
 
-	def __init__(self, progress_callback, max_value: int):
-
+	def __init__(self, progress_callback, max_value):
+		if max_value <= 0:
+			raise ValueError('Progress total must be positive')
 		self.progress_callback = progress_callback
 		self.max_value = max_value
 		self.current_value = 0
+		progress_callback.emit((100, 0))
+		progress_callback.emit((0,))
 
-		self.progress_callback.emit((100, 0))
-		self.progress_callback.emit((0,))
+	def __call__(self, value):
+		self.current_value += value
+		self.progress_callback.emit((min(100, self.current_value * 100 // self.max_value),))
 
-	def __call__(self, value: int):
-
-		# ==========================================
-		# DIRECT PERCENTAGE MODE
-		# Used by rsw.py
-		# ==========================================
-
-		if self.max_value == 100:
-
-			percent = value
-
-		# ==========================================
-		# INCREMENTAL MODE
-		# Used for flashing with memory.py
-		# ==========================================
-
-		else:
-
-			self.current_value += value
-
-			percent = int(
-				(self.current_value / self.max_value) * 100
-			)
-
-		if percent > 100:
-			percent = 100
-
-		self.progress_callback.emit((percent,))
-
-	def title(self, title: str):
+	def title(self, title):
 		pass
+
 
 class WorkerSignals(QObject):
     finished = pyqtSignal()
@@ -193,6 +167,7 @@ class Ui(QtWidgets.QMainWindow):
 
 	def __init__(self):
 		super(Ui, self).__init__()
+		self._operation_running = False
 		self.load_ui()
 		self.previous_baudrate = False
 		self.interfacesBox.currentIndexChanged.connect(self.update_baudrate_state)
@@ -296,12 +271,28 @@ class Ui(QtWidgets.QMainWindow):
 		self.mtosFileBtn.clicked.connect(self.handler_select_mtos_file)
 		self.mtosRunBtn.clicked.connect(self.handler_run_mtos)
 
-	def click_handler (self, callback):
-		worker = Worker(callback)
-		worker.signals.log.connect(self.log)
-		worker.signals.progress.connect(self.progress_callback)
-		worker.signals.error.connect(self.handle_exception)
-		self.thread_manager.start(worker)
+	def click_handler(self, callback):
+		if self._operation_running:
+			self.log('[!] An ECU operation is already in progress.')
+			return
+		self._operation_running = True
+		try:
+			worker = Worker(callback)
+			worker.signals.log.connect(self.log)
+			worker.signals.progress.connect(self.progress_callback)
+			worker.signals.error.connect(self.handle_exception)
+			worker.signals.finished.connect(self._operation_finished)
+			self.thread_manager.start(worker)
+		except Exception:
+			self._operation_running = False
+			raise
+
+	@pyqtSlot()
+	def _operation_finished(self):
+		self._operation_running = False
+		timer = getattr(self, 'validation_timer', None)
+		if timer is not None:
+			timer.stop()
 
 	def send_notification (self, title: str, body: str) -> None:
 		try:
@@ -515,15 +506,10 @@ class Ui(QtWidgets.QMainWindow):
 		finally:
 			self._close_bus(log_callback)
 
-	def _close_bus (self, log_callback) -> None:
-		# the device too, it closes the channel opened in _initialize_ecu()
-		for closeable in (getattr(self, 'bus', None), getattr(self, 'device', None)):
-			if closeable is None:
-				continue
-			try:
-				closeable.close()
-			except GkbusException as e:
-				log_callback.emit('[!] Failed to close the port. This shouldn\'t affect operation. Please report to OpenGK: {}'.format(str(e)))
+	def _close_bus(self, log_callback):
+		bus, device = getattr(self, 'bus', None), getattr(self, 'device', None)
+		self.bus = self.device = None
+		close_connection(bus, device, log_callback)
 
 	def _initialize_ecu (self, log_callback, m797_supported=False) -> ECU:
 		self._close_bus(log_callback)
@@ -540,21 +526,11 @@ class Ui(QtWidgets.QMainWindow):
 
 		log_callback.emit('[*] Initializing interface {} ({})'.format(device.description(), BUS_NAMES[bus_type]))
 
-		config = yaml.safe_load(open(os.path.dirname(os.path.abspath(__file__)) + '/gkflasher.yml'))
+		with open(os.path.dirname(os.path.abspath(__file__)) + '/gkflasher.yml') as source:
+			config = yaml.safe_load(source)
 
 		self.device = device
-		if bus_type == Bus.CANBUS:
-			channel = device.canbus(config['canbus']['bitrate'])
-			transport = Kwp2000OverCanTransport(channel, tx_id=config['canbus']['tx_id'], rx_id=config['canbus']['rx_id'])
-		else:
-			channel = device.kline()
-			transport = Kwp2000OverKLineTransport(channel, tx_id=config['kline']['tx_id'], rx_id=config['kline']['rx_id'])
-
-		# opened here rather than by the transport, so the channel outlives the KWP2000 session
-		# (RSW switches to CCP on it). Closed by _close_bus() along with the device
-		channel.open()
-
-		self.bus = kwp2000.Kwp2000Protocol(transport)
+		self.bus = open_connection(device, bus_type, config[bus_type.value])
 		self.bus.init(StartCommunication(), keepalive_command=TesterPresent(ResponseType.REQUIRED), keepalive_delay=2)
 
 		# Detect Kefico in the application session, before SIMK setup/security.
@@ -621,7 +597,9 @@ class Ui(QtWidgets.QMainWindow):
 
 	def initialize_ecu (self, log_callback, m797_supported=False) -> ECU:
 		try:
-			return self._initialize_ecu(log_callback, m797_supported=m797_supported)
+			ecu = self._initialize_ecu(log_callback, m797_supported=m797_supported)
+			if ecu is not False:
+				return ecu
 		except TimeoutException:
 			log_callback.emit('[*] Timeout! Try again. Maybe the ECU isn\'t connected properly?')
 		except Exception as e:
@@ -630,159 +608,42 @@ class Ui(QtWidgets.QMainWindow):
 		self._close_bus(log_callback)
 		return False
 
-	def disconnect_ecu (self, ecu: ECU) -> None:
-		release_timing(ecu.bus)
-
-		if isinstance(ecu, M797ECU):
-			return self._close_bus(self.log_signal)
+	def disconnect_ecu(self, ecu):
 		try:
-			ecu.bus.execute(StopCommunication())
-		except (kwp2000.Kwp2000NegativeResponseException, TimeoutException, AttributeError):
-			pass
-		ecu.bus.close()
+			if not isinstance(ecu, M797ECU):
+				release_timing(ecu.bus)
+				try:
+					ecu.bus.execute(StopCommunication())
+				except (kwp2000.Kwp2000NegativeResponseException, TimeoutException, AttributeError):
+					pass
+		finally:
+			self._close_bus(self.log_signal)
 
-	def gui_read_eeprom (self, ecu: ECU, address_start: int = 0x000000, address_stop: int = None, escalate_privileges: bool = False, output_filename: str = None, log_callback=None, progress_callback=None):
+	def gui_read_eeprom (self, ecu: ECU, address_start: int = None, address_stop: int = None, escalate_privileges: bool = False, output_filename: str = None, log_callback=None, progress_callback=None):
 		if isinstance(ecu, M797ECU):
 			return self.gui_m797_read(ecu, address_start, address_stop, escalate_privileges,
 				output_filename, log_callback, progress_callback)
-		eeprom_size = ecu.get_eeprom_size_bytes()
-
-		if escalate_privileges:
-			log_callback.emit('[*] Attempting privilege escalation with the IOCLID patch')
-			if (ecu.security_access(AccessLevel.SIEMENS_0xFD)):
-				log_callback.emit('[*] Success!')
-				address_start = 0
-				address_stop = eeprom_size
-			else:
-				log_callback.emit('[!] Patch likely not present, failed to escalate privileges (this is normal).')
-				log_callback.emit('    Read will only include the calibration and program zones.')
-				log_callback.emit('    If you\'re running ca663056, feel encouraged to apply the IOCLID patch.')
-				log_callback.emit('    It will allow you to read the whole memory over OBD2, just like BSL.')
-				log_callback.emit('    You can find it at https://github.com/OpenGK-org/opengk-simk')
-
-		if (address_stop == None):
-			address_stop = eeprom_size
-
-		log_callback.emit('[*] Reading from {} to {}'.format(hex(address_start), hex(address_stop)))
-
-		requested_size = address_stop-address_start
-		eeprom = bytearray([0xFF]*eeprom_size)
-
-		fetched = read_memory(ecu, address_start=address_start, address_stop=address_stop, progress_callback=Progress(progress_callback, requested_size))
-
-		eeprom_start = ecu.calculate_bin_offset(address_start)
-		eeprom_end = eeprom_start + len(fetched)
-		eeprom[eeprom_start:eeprom_end] = fetched
-
-		if (output_filename == None):
-			try:
-				calibration = ecu.get_calibration()
-				description = ecu.get_calibration_description()
-				hw_rev_c = strip(''.join([chr(x) for x in list(ecu.bus.execute(ReadEcuIdentification(0x8c)).get_data())[1:]]))
-				hw_rev_d = strip(''.join([chr(x) for x in list(ecu.bus.execute(ReadEcuIdentification(0x8d)).get_data())[1:]]))
-				output_filename = "{}_{}_{}_{}_{}.bin".format(description, calibration, hw_rev_c, hw_rev_d, datetime.now().strftime('%Y-%m-%d_%H%M'))
-			except: # dirty
-				output_filename = "output_{}_to_{}.bin".format(hex(address_start), hex(address_stop))
-		
-		with open(output_filename, "wb") as file:
-			file.write(bytes(eeprom))
-
-		# Display user friendly path based on OS
-		if os.name == 'nt':
-			log_callback.emit('[*] saved to {}'.format(home + "\\" + output_filename))
-		else: # nix
-			log_callback.emit('[*] saved to {}'.format(home + "/" + output_filename))
-
-		log_callback.emit('[*] Done!')
-		self.send_notification('Reading finished', 'Saved to {}'.format(home + "\\" + output_filename))
+		path = SimkOperations(ecu, log_callback,
+			progress_factory=lambda total: Progress(progress_callback, total)).read(
+				address_start, address_stop, escalate_privileges, output_filename)
+		self.send_notification('Reading finished', 'Saved to {}'.format(path))
 
 	def gui_flash_eeprom (self, ecu: ECU, input_filename: str, flash_calibration: bool = True, flash_program: bool = True, log_callback=None, progress_callback=None):
 		if isinstance(ecu, M797ECU):
 			return self.gui_m797_flash(ecu, input_filename, flash_calibration, flash_program,
 				log_callback, progress_callback)
 		log_callback.emit('[*] Loading up {}'.format(input_filename))
-
 		try:
-			with open(input_filename, 'rb') as file:
-				eeprom = file.read()
-			log_callback.emit('[*] Loaded {} bytes'.format(len(eeprom)))
+			with open(input_filename, 'rb') as source:
+				image = source.read()
+			log_callback.emit('[*] Loaded {} bytes'.format(len(image)))
+			SimkOperations(ecu, log_callback,
+				progress_factory=lambda total: Progress(progress_callback, total),
+				phase_callback=lambda name, active: progress_callback.emit((0, 0, int(active), name))
+			).flash(image, flash_calibration, flash_program)
+			self.send_notification('Flashing finished', 'Turn off your ignition for 10 seconds')
 		except FileNotFoundError:
 			log_callback.emit('[!] Error: File not found.')
-			return self.disconnect_ecu(ecu)
-
-		if flash_program:
-			log_callback.emit('[*] start routine 0x00 (erase program code section)')
-			# Start the estimated erase progress animation.
-			progress_callback.emit((0, 0, 1, 'erase'))
-			try:
-				ecu.bus.execute(StartRoutineByLocalIdentifier(Routine.ERASE_PROGRAM.value))
-			finally:
-				# Stop the animation when the erase routine finishes.
-				progress_callback.emit((0, 0, 0))
-
-			# we need to start 16 bytes later as the program section starts with a flag that we can't write.
-			payload_start = ecu.calculate_bin_offset(ecu.get_region('program').write.address) + 16
-			payload_stop = payload_start + dynamic_find_end(eeprom[payload_start:(payload_start+ecu.get_region('program').write.size-16)])
-			payload = eeprom[payload_start:payload_stop]
-
-			if payload_stop == payload_start:
-				log_callback.emit('[!!!] Adjusted payload has a length of 0. This most probably means you\'re trying to flash an empty file, or trying to flash a zone from a file that doesn\'t have it.')
-
-			flash_start = ecu.get_region('program').write.address + 16
-			flash_size = payload_stop-payload_start
-
-			log_callback.emit('[*] Uploading data to the ECU')
-			write_memory(ecu, payload, flash_start, flash_size, progress_callback=Progress(progress_callback, flash_size))
-
-		if flash_calibration:
-			log_callback.emit('[*] start routine 0x01 (erase calibration section)')
-			ecu.bus.execute(StartRoutineByLocalIdentifier(Routine.ERASE_CALIBRATION.value))
-
-			payload_start = ecu.calculate_bin_offset(ecu.get_region('calibration').write.address)
-			# we need to shave 16 bytes off the top as this is where a flag that we can't write is located.
-			payload_stop = payload_start + dynamic_find_end(eeprom[payload_start:(payload_start+ecu.get_region('calibration').write.size-16)])
-			payload = eeprom[payload_start:payload_stop]
-
-			if payload_stop == payload_start:
-				log_callback.emit('[!!!] Adjusted payload has a length of 0. This most probably means you\'re trying to flash an empty file, or trying to flash a zone from a file that doesn\'t have it.')
-
-			flash_start = ecu.calculate_memory_write_offset(ecu.get_region('calibration').write.address)
-			flash_size = payload_stop-payload_start
-
-			log_callback.emit('[*] Uploading data to the ECU')
-			write_memory(ecu, payload, flash_start, flash_size, progress_callback=Progress(progress_callback, flash_size))
-
-		ecu.bus.transport.set_timeout(300)
-		log_callback.emit('[*] start routine 0x02 (verify blocks and mark as ready to execute)')
-
-		# Sends a signal from the flashing worker to the GUI, telling it to start the validation progress animation.
-		# The bar advances to 95% based on elapsed time, not actual ECU-reported progress. It reaches 100% when the validation routine returns.
-		# (0, 0, 1) → start the progress animation.
-		# (0, 0, 0) → stop the animation and mark progress as 100%.
-		progress_callback.emit((0, 0, 1))
-
-		try:
-			ecu.bus.execute(StartRoutineByLocalIdentifier(Routine.VERIFY_BLOCKS.value))
-		except kwp2000.Kwp2000NegativeResponseException as e:
-			print(str(e))
-			log_callback.emit(str(e))
-			log_callback.emit('[*] Verifying blocks failed! Did you forget to correct the checksum?')
-			
-			log_callback.emit('[!] Your ECU is now soft-bricked. There\'s no need to panic, all you need to do is flash a valid file.')
-			progress_callback.emit((0, 0, 0))
-			return
-
-		progress_callback.emit((0, 0, 0))
-
-		log_callback.emit('[*] ecu reset')
-		log_callback.emit('[*] Done!')
-		self.send_notification('Flashing finished', 'Turn off your ignition for 10 seconds')
-		
-		ecu.bus.transport.set_timeout(0.5)
-		try:
-			ecu.bus.execute(ECUReset(ResetMode.POWER_ON_RESET))
-		except TimeoutException: 
-			pass # response is not guaranteed
 
 	def read_calibration_zone (self, progress_callback, log_callback):
 		ecu = self.initialize_ecu(log_callback, m797_supported=True)
@@ -853,27 +714,10 @@ class Ui(QtWidgets.QMainWindow):
 		if isinstance(ecu, M797ECU):
 			return self.gui_m797_identification(ecu, True, log_callback)
 
-		log_callback.emit('[*] Reading diagnostic trouble codes')
 		ecu.bus.execute(kwp2000.commands.StartDiagnosticSession(kwp2000.enums.DiagnosticSession.DEFAULT,
 																ecu.get_desired_baudrate().index))
 
-		dtcs_raw = ecu.bus.execute(
-			kwp2000.commands.ReadDTCsByStatus(
-				kwp2000.enums.DtcStatus.REQUEST_IDENTIFIED_DTC_AND_STATUS,
-				kwp2000.enums.DtcGroup.POWERTRAIN
-			)
-		).get_data()
-
-		dtc_amount = dtcs_raw[0]
-		log_callback.emit('[*] Amount of DTCs: {}'.format(dtc_amount))
-		dtcs = {}
-		for x in range(dtc_amount):
-			dtc = int.from_bytes(dtcs_raw[1:][(x*3):(x*3) + 2])
-			dtc_status = dtcs_raw[1:][(x*3) + 2]
-			dtcs[dtc] = dtc_status
-
-		for dtc, status in dtcs.items():
-			log_callback.emit('[*] DTC: P{} ({})'.format(f"{dtc:04x}", bin(status)))
+		display_dtcs(ecu.bus, log_callback=log_callback)
 
 		self.disconnect_ecu(ecu)
 
@@ -887,18 +731,7 @@ class Ui(QtWidgets.QMainWindow):
 		if isinstance(ecu, M797ECU):
 			return self.gui_m797_identification(ecu, False, log_callback)
 
-		log_callback.emit('[*] Querying additional parameters,  this might take a few seconds..')
-
-		for parameter_key, parameter in fetch_ecu_identification(ecu.bus).items():
-			value_dec = list(parameter['value'])
-			value_hex = ' '.join([hex(x) for x in value_dec])
-			value_ascii = strip(''.join([chr(x) for x in value_dec]))
-
-			log_callback.emit('')
-			log_callback.emit('    [*] [{}] {}:'.format(hex(parameter_key), parameter['name']))
-			log_callback.emit('            [HEX]: {}'.format(value_hex))
-			log_callback.emit('            [ASCII]: {}'.format(value_ascii))
-			log_callback.emit('')
+		display_identification(ecu.bus, log_callback=log_callback)
 
 		ecu.bus.execute(StartDiagnosticSession(DiagnosticSession.DEFAULT, ecu.get_desired_baudrate().index))
 		try:
@@ -917,129 +750,25 @@ class Ui(QtWidgets.QMainWindow):
 			log_callback.emit('[*] Smartra status: {}'.format(immo_status[immo_data[4]]))
 		self.disconnect_ecu(ecu)
 
-	def correct_checksum (self):
+	def correct_checksum(self):
 		filename = self.checksumFileInput.text()
 		self.log('[*] Reading {}'.format(filename))
-
 		try:
-			with open(filename, 'rb') as file:
-				payload = file.read()
+			with open(filename, 'rb') as source:
+				correction = prepare_checksum_correction(source.read(), self.log)
+			message = '\n'.join(field.describe() for field in correction.fields)
+			if not correction.changes:
+				message += '\nImage checksums already correct.'
+			if QMessageBox.question(self, 'Save checksum to file?', message + '\nSave?',
+					QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+				if correction.changes:
+					self.log('[*] Saving to {}'.format(filename))
+					correction.save(filename)
+				self.log('[*] Done!')
 		except FileNotFoundError:
 			self.log('[!] Error: File not found.')
-			return
-		self.log('Trying to detect type.. ')
-		cks_type = detect_offsets(payload)
-		
-		if cks_type == None:
-			self.log('[!] Error: Calibration zone not detected.')
-			return
-		self.log(cks_type['name'])
-
-		if cks_type.get('algorithm') == 'm797':
-			try:
-				corrected, changes = prepare_m797_checksum_correction(
-					payload, self.log
-				)
-			except (ValueError, RuntimeError) as exc:
-				self.log('[!] Error: {}'.format(exc))
-				return
-			dialog_message = '\n'.join(
-				'Current {} checksum: {}, new checksum: {}'.format(
-					field['name'], hex(field['old']), hex(field['new'])
-				)
-				for field in changes
-			)
-			if not changes:
-				dialog_message += '\nImage checksums already correct.'
-			dialog_message += '\nSave?'
-			if QMessageBox.question(
-				self, 'Save checksum to file?',
-				dialog_message,
-				QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-			) == QMessageBox.Yes and changes:
-				self.log('[*] Saving to {}'.format(filename))
-				try:
-					save_m797_checksum_correction(filename, corrected, changes)
-				except (OSError, ValueError) as exc:
-					self.log('[!] Could not save checksum correction: {}'.format(exc))
-					return
-				self.log('[*] Done!')
-			return
-
-		for region in cks_type['regions']:
-			self.log('[*] Calculating checksum for region {}'.format(region['name']))
-			flag_address, init_address, cks_address, bin_offset = region['flag_address'], region['init_address'], region['cks_address'], region['bin_offset']
-
-			amount_of_zones = int.from_bytes(payload[cks_address+2:cks_address+3], "big")
-			self.log('[*] Amount of zones: {}'.format(amount_of_zones))
-
-			if (amount_of_zones == 0 or amount_of_zones == 0xFF):
-				self.log('[*] Skipping region {}'.format(region['name']))
-				continue
-
-			checksums = []
-
-			zone_address = cks_address
-			for zone_index in range(amount_of_zones):
-
-				self.log('[*] Trying to find addresses of zone #{}.. '.format(zone_index+1))
-				zone_start_offset = zone_address+0x04
-				zone_start = concat_3_bytes(read_and_reverse(payload, zone_start_offset, 3)) + bin_offset
-
-				zone_stop_offset = zone_address+0x08
-				zone_stop = concat_3_bytes(read_and_reverse(payload, zone_stop_offset, 3)) + bin_offset + 1
-				self.log('{} - {}'.format(hex(zone_start), hex(zone_stop)))
-
-				self.log('[*] Trying to find initial value.. ')
-				if (zone_index == 0):
-					initial_value_bytes = read_and_reverse(payload, init_address, 2)
-					initial_value = (initial_value_bytes[0]<< 8) | initial_value_bytes[1]
-				else:
-					initial_value = checksums[zone_index-1]
-				self.log(hex(initial_value))
-
-				self.log('[*] checksum of zone #{}: '.format(zone_index+1))
-				zone_cks = checksum(payload, zone_start, zone_stop, initial_value)
-				self.log(hex(zone_cks))
-				checksums.append(zone_cks)
-				zone_address += 0x08
-
-			checksum_b1 = (checksums[-1] >> 8) & 0xFF
-			checksum_b2 = (checksums[-1] & 0xFF)
-			checksum_reversed = (checksum_b2 << 8) | checksum_b1
-
-			current_checksum = int.from_bytes(payload[cks_address:cks_address+2], "big")
-			region['current_checksum'] = current_checksum
-			region['checksum'] = checksum_reversed
-
-			self.log('[*] OK! Current {} checksum: {}, new checksum: {}'.format(region['name'], hex(current_checksum), hex(checksum_reversed)))
-
-		dialog_message = ''
-		for region in cks_type['regions']:
-			try:
-				dialog_message += 'Current {} checksum: {}, new checksum: {}\n'.format(region['name'], hex(region['current_checksum']), hex(region['checksum']))
-			except KeyError:
-				continue
-		dialog_message += 'Save?'
-
-		if QMessageBox.question(
-				self, 
-				'Save checksum to file?', 
-				dialog_message,
-				QMessageBox.Yes | QMessageBox.No, 
-				QMessageBox.No
-			) == QMessageBox.Yes:
-
-			self.log('[*] Saving to {}'.format(filename))
-			with open(filename, 'rb+') as file:
-				for region in cks_type['regions']:
-					file.seek(region['cks_address'])
-					try:
-						file.write(region['checksum'].to_bytes(2, "big"))
-					except KeyError:
-						continue
-
-		self.log('[*] Done!')
+		except (OSError, ValueError, RuntimeError) as exc:
+			self.log('[!] Could not correct checksum: {}'.format(exc))
 
 	def flash_calibration (self, progress_callback, log_callback):
 		ecu = self.initialize_ecu(log_callback, m797_supported=True)

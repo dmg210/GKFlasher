@@ -143,3 +143,8 @@ This behaviour is followed by default by GKFlasher's --read command.
 
 `-l --logger` - Start KWP2000 Datalogger 
 
+## Development
+
+Run the hardware-free regression tests with `python -X utf8 -B -m unittest discover -s tests`.
+See [the architecture notes](docs/architecture.md) for the shared backend, checksum modules and frontend responsibilities.
+
