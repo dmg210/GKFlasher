@@ -1,12 +1,15 @@
 import struct
 import time
+from contextlib import nullcontext
+from pathlib import Path
 
+from alive_progress import alive_bar
 from gkbus.channel import KLineTiming
 from gkbus.protocol import kwp2000
 
 from . import mtos_kernel
-from .kernel import KERNEL_ASSET, KERNEL_STARTED, Kernel, KernelError, KernelLink, enter, identification, load_asset, read_partial
-from .ecu import ECU, enable_security_access
+from .kernel import KERNEL_ASSET, KERNEL_STARTED, Kernel, KernelError, KernelLink, Progress, enter, identification, load_asset, read_partial
+from .ecu import ECU, enable_security_access, request_security_seed
 from .mtos_asm import (
 	build_blob,
 	crc16_mtos,
@@ -17,6 +20,9 @@ from .mtos_asm import (
 	payload_bsl_kernel_shim,
 	payload_kline_hello,
 	payload_memory_dump,
+	payload_calibration_read,
+	CALIBRATION_READ_BAUDRATE,
+	CALIBRATION_READ_BLOCK_SIZE,
 	payload_loader,
 	STAGE2_ADDRESS,
 )
@@ -49,9 +55,7 @@ def _siemens_access (ecu: ECU, mtos_key: int, log_callback=None) -> None:
 	this has to be redone after every StartDiagnosticSession.'''
 	log('[*] Siemens (0xFD) security access', log_callback)
 	key = mtos_key.to_bytes(4, 'big')
-	seed = ecu.bus.execute(
-		kwp2000.commands.SecurityAccess().request_seed(access_level=AccessLevel.SIEMENS_0xFD.value)
-	).get_data()[1:]
+	seed = request_security_seed(ecu.bus, AccessLevel.SIEMENS_0xFD.value)
 
 	if (sum(seed) == 0):
 		log('ECU returned seed=0. Either it\'s unlocked, or previous diagnostics session was still active', log_callback)
@@ -97,14 +101,18 @@ def _enter_execution_session (ecu: ECU, mtos_key: int, log_callback=None) -> Non
 
 def upload_blob (ecu: ECU, blob: bytes, base: int = MTOS_BASE, log_callback=None) -> None:
 	log('[*] Uploading {} byte blob to RAM at 0x{:04X}'.format(len(blob), base), log_callback)
-	written = 0
-	while written < len(blob):
-		chunk = blob[written:written + 16]
-		payload = (base + written).to_bytes(3, 'big') + len(chunk).to_bytes(1, 'little') + chunk
-		ecu.bus.execute(
-			kwp2000.commands.WriteMemoryByAddress(offset=0x0, data_to_write=bytes([0xFF, 0xFF])).set_data(payload)
-		)
-		written += len(chunk)
+	with (nullcontext() if log_callback is not None else alive_bar(len(blob), title='Uploading MTOS', unit='B')) as bar:
+		written = 0
+		while written < len(blob):
+			chunk = blob[written:written + 16]
+			payload = (base + written).to_bytes(3, 'big') + len(chunk).to_bytes(1, 'little') + chunk
+			ecu.bus.execute(
+				kwp2000.commands.WriteMemoryByAddress(offset=0x0, data_to_write=bytes([0xFF, 0xFF])).set_data(payload)
+			)
+			written += len(chunk)
+			if bar is not None:
+				bar(len(chunk))
+
 
 
 def execute (ecu: ECU, raw: bool = False, mtos_key: int | None = None, log_callback=None):
@@ -184,7 +192,7 @@ def _read_routine_reply (channel, length: int = PENDING_FRAME_LENGTH, timeout: f
 	return None
 
 
-def listen (channel, duration: float = 2.0, idle: float = 0.4) -> bytes:
+def listen (channel, duration: float = 2.0, idle: float = 0.4, log_callback=None) -> bytes:
 	'''Collect raw bytes off the K-line. Returns as soon as the stream goes
 	quiet for `idle` seconds (once anything has arrived), or after `duration`
 	seconds at the latest - so a dump of any length is captured in full without
@@ -192,13 +200,16 @@ def listen (channel, duration: float = 2.0, idle: float = 0.4) -> bytes:
 	collected = bytearray()
 	deadline = time.time() + duration
 	last = time.time()
-	while time.time() < deadline:
-		chunk = read_partial(channel, 256, 0.1)
-		if chunk:
-			collected += chunk
-			last = time.time()
-		elif collected and (time.time() - last) >= idle:
-			break
+	with (nullcontext() if log_callback is not None else alive_bar(title='Receiving MTOS', unit='B')) as bar:
+		while time.time() < deadline:
+			chunk = read_partial(channel, 256, 0.1)
+			if chunk:
+				collected += chunk
+				if bar is not None:
+					bar(len(chunk))
+				last = time.time()
+			elif collected and (time.time() - last) >= idle:
+				break
 	return bytes(collected)
 
 
@@ -215,7 +226,7 @@ def run_hello (ecu: ECU, signature: bytes, mtos_key: int | None = None, log_call
 	log('[*] MTOS checksum: 0x{:04X}'.format(crc16_mtos(body)), log_callback)
 	log('[*] Executing, listening on K-line', log_callback)
 	channel = execute(ecu, raw=True, mtos_key=mtos_key, log_callback=log_callback)
-	out = listen(channel)
+	out = listen(channel, log_callback=log_callback)
 	log('[*] Received: {} ({})'.format(out.hex(), out), log_callback)
 	if KLINE_HELLO in out:
 		log('[+] SUCCESS: payload executed and echoed {!r}'.format(KLINE_HELLO), log_callback)
@@ -229,9 +240,58 @@ def run_dump (ecu: ECU, signature: bytes, address: int, length: int, mtos_key: i
 	upload_blob(ecu, blob, log_callback=log_callback)
 	log('[*] Executing memory dump 0x{:06X}+0x{:X} over K-line'.format(address, length), log_callback)
 	channel = execute(ecu, raw=True, mtos_key=mtos_key, log_callback=log_callback)
-	out = listen(channel, duration=max(3.0, length / 300.0))
+	out = listen(channel, duration=max(3.0, length / 300.0), log_callback=log_callback)
 	log('[*] Received {} bytes: {}'.format(len(out), out.hex()), log_callback)
 	return out
+
+
+def run_calibration_read (ecu: ECU, signature: bytes, mtos_key: int, output_filename=None,
+                         log_callback=None, progress_callback=None) -> bytes:
+	'''Read calibration through RAM-only MTOS code, without KWP requests during transfer.'''
+	if ecu.get_desired_baudrate().baudrate != 10400:
+		raise ValueError('MTOS calibration reads must start at 10400 baud; omit --desired-baudrate')
+	region = ecu.get_region('calibration').read
+	body = payload_calibration_read(region.address, region.size)
+	upload_blob(ecu, build_blob(body, signature), log_callback=log_callback)
+	channel = ecu.bus.transport.channel
+	progress = Progress(progress_callback, region.size, 'Reading calibration') if progress_callback is not None else None
+	try:
+		execute(ecu, raw=True, mtos_key=mtos_key, log_callback=log_callback)
+		marker = channel.read(4, timeout=2)
+		if marker != b'MTRD':
+			raise IOError('Unexpected MTOS calibration startup: {}'.format(marker.hex(' ')))
+		channel.set_baudrate(CALIBRATION_READ_BAUDRATE)
+		channel.reset_buffers()
+		channel.set_timing(KLineTiming(p3_min=0, p4_min=0))
+		log('[*] Reading calibration at {} baud'.format(CALIBRATION_READ_BAUDRATE), log_callback)
+		started = time.perf_counter()
+		data = bytearray()
+		with (nullcontext() if progress is not None else alive_bar(region.size, title='Reading calibration', unit='B')) as bar:
+			while len(data) < region.size:
+				# Grant one bounded burst at a time so a host/USB pause cannot
+				# overflow the adapter's receive FIFO.
+				channel.write(b'\xA5')
+				size = min(CALIBRATION_READ_BLOCK_SIZE, region.size - len(data))
+				chunk = channel.read(size, timeout=2)
+				data.extend(chunk)
+				if progress is not None:
+					progress(len(data))
+				else:
+					bar(len(chunk))
+		stored_crc = int.from_bytes(channel.read(2, timeout=2), 'little')
+		if crc16_mtos(data, seed=0xFFFF) != stored_crc:
+			raise IOError('MTOS calibration read CRC mismatch; no BIN saved')
+		log('[+] Read verified in {:.2f}s'.format(time.perf_counter() - started), log_callback)
+		image = bytearray(b'\xFF' * ecu.get_eeprom_size_bytes())
+		offset = ecu.calculate_bin_offset(region.address)
+		image[offset:offset + region.size] = data
+		output = Path(output_filename or 'mtos_calibration_{}.bin'.format(time.strftime('%Y-%m-%d_%H%M%S'))).resolve()
+		output.write_bytes(image)
+		log('[*] saved to {}'.format(output), log_callback)
+		return bytes(data)
+	finally:
+		if not check_after_reset(ecu.bus, log_callback=log_callback):
+			raise IOError('MTOS calibration reader finished, but diagnostic recovery failed')
 
 
 def run_payload_file (ecu: ECU, signature: bytes, body: bytes, mtos_key: int | None = None, log_callback=None) -> bytes:
@@ -239,7 +299,7 @@ def run_payload_file (ecu: ECU, signature: bytes, body: bytes, mtos_key: int | N
 	blob = build_blob(body, signature)
 	upload_blob(ecu, blob, log_callback=log_callback)
 	channel = execute(ecu, raw=True, mtos_key=mtos_key, log_callback=log_callback)
-	out = listen(channel)
+	out = listen(channel, log_callback=log_callback)
 	log('[*] Received: {}'.format(out.hex()), log_callback)
 	return out
 
@@ -254,8 +314,11 @@ def run_loader (ecu: ECU, signature: bytes, stage2: bytes, mtos_key: int | None 
 	log('[*] Executing loader, streaming {} byte second stage to 0x{:04X}'.format(
 		len(stage2), STAGE2_ADDRESS), log_callback)
 	channel = execute(ecu, raw=True, mtos_key=mtos_key, log_callback=log_callback)
-	channel.write(struct.pack('<H', len(stage2)) + stage2)
-	out = listen(channel, duration=3.0)
+	with (nullcontext() if log_callback is not None else alive_bar(len(stage2), title='Uploading second stage', unit='B')) as bar:
+		channel.write(struct.pack('<H', len(stage2)) + stage2)
+		if bar is not None:
+			bar(len(stage2))
+	out = listen(channel, duration=3.0, log_callback=log_callback)
 	log('[*] Received {} bytes: {}'.format(len(out), out.hex()), log_callback)
 	return out
 
@@ -279,7 +342,10 @@ def launch_kernel (ecu: ECU, signature: bytes, mtos_key: int | None = None, log_
 	stale = link.drain(quiet=0.1, limit=1.0)
 	if stale:
 		log('[*] Dropped {} stale byte(s): {}'.format(len(stale), stale.hex()), log_callback)
-	link.send(struct.pack('<H', len(stage2)) + stage2)
+	with (nullcontext() if log_callback is not None else alive_bar(len(stage2), title='Uploading kernel', unit='B')) as bar:
+		link.send(struct.pack('<H', len(stage2)) + stage2)
+		if bar is not None:
+			bar(len(stage2))
 
 	# 0x03 once it runs. Anything in front of it is what's left of the KWP exchange
 	started = link.read(16, 0.3)
@@ -423,6 +489,9 @@ def mtos_handler (ecu: ECU, mtos_key: int, mode: str = 'hello',
 		run_hello(ecu, signature, mtos_key=mtos_key, log_callback=log_callback)
 	elif mode == 'dump':
 		run_dump(ecu, signature, address, length, mtos_key=mtos_key, log_callback=log_callback)
+	elif mode == 'read-calibration':
+		run_calibration_read(ecu, signature, mtos_key, output_filename,
+			log_callback=log_callback, progress_callback=progress_callback)
 	elif mode == 'payload':
 		if not payload_filename:
 			log('[!] payload mode requires a payload file', log_callback)

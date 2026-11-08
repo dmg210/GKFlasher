@@ -87,7 +87,47 @@ This behaviour is followed by default by GKFlasher's --read command.
 
 `-b --baudrate {baudrate}`
 
-`--desired-baudrate {baudrate identifier}` - See ecu_definitions.py
+`--desired-baudrate {baudrate identifier}` - See ecu_definitions.py for presets.
+Selector `0x06` sends a custom baudrate supplied by `--session-baudrate`.
+
+`--session-baudrate {baudrate}` - Override the physical K-Line speed after selecting a
+session with `--desired-baudrate`. The selector sent to the ECU is unchanged.
+With selector `0x06`, this value is also sent to the ECU as three big-endian bytes.
+
+`--kline-p4-min {milliseconds}` - Set the gap between request bytes (0 inclusive to 18 ms exclusive).
+Positive values enable echo-paced serial transmission with an 18 ms byte-gap guard,
+leaving margin below the tested ECU's 22 ms receive deadline. Startup uses contiguous
+frames before enabling pacing at the selected session speed. In this mode, lost KWP
+memory-read responses get up to three attempts with a 250 ms response wait per frame
+portion, instead of the normal long timeout. Writes and programming commands are never
+automatically replayed after a response timeout. These are per-connection I/O settings;
+the installed FTDI driver and its persistent settings are not changed.
+On serial adapters, a nonzero value waits for each byte's echo before the next gap
+and byte. This requires the companion gkbus serial echo-pacing change. Omit the option
+to keep the existing timing. These options apply to normal K-Line diagnostics, not BSL or MTOS.
+
+For an experimental calibration read with selector `0x05`, a 107143-baud interface,
+and echo pacing:
+
+```powershell
+python gkflasher.py --protocol kline --interface COM69 --desired-baudrate 0x05 --session-baudrate 107143 --kline-p4-min 0.2 --read-calibration
+```
+
+On the CA663057/COM69 bench, guarded pacing and bounded read recovery completed
+repeated verified 64 KiB calibration reads at approximately 3 kB/s. Recovery handles
+occasional lost requests; this is not a guarantee of stall-free transmission on every setup.
+
+To test the custom selector at the previously accepted 32609-baud request:
+
+```powershell
+python gkflasher.py --protocol kline --interface COM69 --desired-baudrate 0x06 --session-baudrate 32609 --read-calibration
+```
+
+The wire request is `10 85 06 00 7F 61`. The generic option accepts a positive
+24-bit rate; actual ECU support varies. CA663057 accepted this request but rejected
+an explicit 125000-baud request with NRC `0x22`. Its custom-rate parser has limitations;
+an accepted baud request does not guarantee a timeout-free read. `0x06` is currently
+a CLI option; it is not a fixed-rate entry in the GUI dropdown.
 
 `-i --interface {interface}` - for example `/dev/ttyUSB0` or `COM3` (K-Line), `can0` (SocketCAN), `pcan:PCAN_USBBUS1` (python-can interface:channel) or `j2534:openport` (J2534 adapter, K-Line and CAN; `j2534` for the first installed one). If the interface isn't found, GKFlasher lists the available ones to choose from
 
@@ -121,7 +161,7 @@ This behaviour is followed by default by GKFlasher's --read command.
 
 `--bsl` - Bootstrap loader, with the ECU in boot mode: read/write the whole external flash (boot sectors included) or read the internal ROM, on the K-line interface. See [docs/bsl.md](docs/bsl.md). Use with `--bsl-mode {hwinfo,read,readint,write}`, `--bsl-image {file}`, `--bsl-baudrate`, `--bsl-driver {auto,i4,v6}`.
 
-`--mtos` - Mini Test Operating System - upload and execute a small routine in ECU RAM. See [docs/mtos.md](docs/mtos.md). Use with `--mtos-key`, `--mtos-mode {hello,dump,payload,loader,probe,read,fullflash}`, `--mtos-payload {file}`.
+`--mtos` - Mini Test Operating System - upload and execute a small routine in ECU RAM. See [docs/mtos.md](docs/mtos.md). Use with `--mtos-key`, `--mtos-mode {hello,dump,payload,loader,probe,read,read-calibration,fullflash}`, `--mtos-payload {file}`. The experimental `read-calibration` mode uses flow-controlled 120-byte blocks at 750000 baud on the 24 MHz C167 and verifies CRC16; start at 10400 baud.
 
 `--rsw-boot1 {input filename}` - Flash Boot1 using RSW bootstrap
 

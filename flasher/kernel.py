@@ -21,6 +21,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+from alive_progress import alive_bar
+
 from gkbus.channel import KLineTiming
 from gkbus.exceptions import TimeoutException
 
@@ -272,24 +274,27 @@ class Progress:
 		self.progress_callback = progress_callback
 		self.total = max(total, 1)
 		self.label = label
-		self._last = -1
+		self._bar_context = None
+		self._bar = None
 		if progress_callback:
 			progress_callback.emit((self.total, 0))
 			progress_callback.emit((0,))
+		else:
+			self._bar_context = alive_bar(self.total, title=label, unit='B', manual=True)
+			self._bar = self._bar_context.__enter__()
 
 	def __call__ (self, done: int) -> None:
 		if self.progress_callback:
 			self.progress_callback.emit((done,))
 			return
-		percent = done * 100 // self.total
-		if percent != self._last:
-			self._last = percent
-			print('\r[*] {}: {}%  '.format(self.label, percent), end='', flush=True)
+		if self._bar is not None:
+			self._bar(done / self.total)
 
 	def finish (self) -> None:
-		if not self.progress_callback and self._last >= 0:
-			print('')
-			self._last = -1
+		if self._bar_context is not None:
+			self._bar_context.__exit__(None, None, None)
+			self._bar_context = None
+			self._bar = None
 
 
 class Kernel:

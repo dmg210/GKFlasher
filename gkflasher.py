@@ -1,10 +1,12 @@
 import argparse, time, yaml, logging, sys, os, traceback
 from datetime import datetime
+from dataclasses import replace
 from alive_progress import alive_bar
-from gkbus.device import Bus, DeviceABC, discover, find_device
+from gkbus.device import Bus, DeviceABC, SerialKLineChannel, discover, find_device
 from gkbus.exceptions import DeviceException, GkbusException, TimeoutException
 from gkbus.transport import Kwp2000OverKLineTransport, Kwp2000OverCanTransport, RawPacket, PacketDirection
 from gkbus.protocol import kwp2000
+from gkbus.channel import KLineTiming
 from flasher.memory import read_memory, write_memory, dynamic_find_end
 from flasher.ecu import ECU, identify_ecu, fetch_ecu_identification, enable_security_access, negotiate_timing, release_timing, ECUIdentificationException, DesiredBaudrate
 from flasher.checksum import correct_checksum
@@ -144,7 +146,7 @@ def cli_clear_adaptive_values (ecu):
 
 def cli_read_dtcs (ecu):
 	print('[*] Reading diagnostic trouble codes')
-	ecu.bus.execute(kwp2000.commands.StartDiagnosticSession(kwp2000.enums.DiagnosticSession.DEFAULT, ecu.get_desired_baudrate().index))
+	ecu.bus.execute(ecu.get_desired_baudrate().session_command(kwp2000.enums.DiagnosticSession.DEFAULT))
 
 	dtcs_raw = ecu.bus.execute(
 		kwp2000.commands.ReadDTCsByStatus(
@@ -172,7 +174,12 @@ def load_arguments ():
 	parser.add_argument('-p', '--protocol', help='Protocol to use. canbus or kline')
 	parser.add_argument('-i', '--interface', help='Linux: can0 for socketCAN. | Windows: gs_usb:0, slcan:COM69, pcan:PCAN_USBBUS1, vector:0 | J2534: j2534, j2534:openport')
 	parser.add_argument('-b', '--baudrate', type=int)
-	parser.add_argument('--desired-baudrate', type=lambda x: int(x,0))
+	parser.add_argument('--desired-baudrate', type=lambda x: int(x,0),
+		help='ECU baudrate selector; 0x06 requires --session-baudrate for a custom rate')
+	parser.add_argument('--session-baudrate', type=int,
+		help='Override the K-Line interface speed after --desired-baudrate selects the ECU session')
+	parser.add_argument('--kline-p4-min', type=float,
+		help='Request-byte gap in milliseconds (0..20); serial adapters wait for each byte echo when nonzero')
 	parser.add_argument('-f', '--flash', help='Filename to full flash')
 	parser.add_argument('--flash-calibration', help='Filename to flash calibration zone from')
 	parser.add_argument('--flash-program', help='Filename to flash program zone from')
@@ -199,9 +206,9 @@ def load_arguments ():
 	parser.add_argument('--rsw-full', help='Flash full image set using RSW bootstrap')
 	parser.add_argument('--rsw-virginize', help='Virginize ECU using RSW bootstrap')
 	parser.add_argument('--mtos',  help='Mini Test Operating System', action='store_true')
-	parser.add_argument('--mtos-mode', help='MTOS mode: hello (safe self-test), dump, payload, loader, '
+	parser.add_argument('--mtos-mode', help='MTOS mode: hello (safe self-test), dump, payload, loader, read-calibration (flow-controlled RAM stream), '
 		'probe/read/fullflash (BSL kernel: dry run, whole flash read, whole flash write incl. boot sectors)',
-		default='hello', choices=['hello', 'dump', 'payload', 'loader', 'probe', 'read', 'fullflash'])
+		default='hello', choices=['hello', 'dump', 'payload', 'loader', 'probe', 'read', 'read-calibration', 'fullflash'])
 	parser.add_argument('--mtos-payload', help='BIN file with payload body (payload mode), second stage (loader mode) or full 512 KB image (fullflash mode)')
 	parser.add_argument('--mtos-key', help='Key to use for Siemens access level', type=lambda x: int(x,0))
 	parser.add_argument('--mtos-attach', help='Pick up the BSL kernel a failed probe/read/fullflash left running (ECU still powered). '
@@ -228,6 +235,20 @@ def load_arguments ():
 
 	if args.protocol:
 			GKFlasher_config['protocol'] = args.protocol
+	if args.session_baudrate is not None or args.kline_p4_min is not None:
+		if GKFlasher_config['protocol'] != 'kline' or args.bsl or args.mtos:
+			parser.error('--session-baudrate and --kline-p4-min require normal K-Line diagnostics')
+	if args.session_baudrate is not None:
+		if args.session_baudrate <= 0 or (args.desired_baudrate != 0x06 and
+			(args.desired_baudrate not in BAUDRATES or BAUDRATES[args.desired_baudrate] == 10400)):
+			parser.error('--session-baudrate requires a positive speed and a higher-speed --desired-baudrate selector')
+	if args.desired_baudrate == 0x06:
+		if args.session_baudrate is None or args.session_baudrate > 0xFFFFFF:
+			parser.error('--desired-baudrate 0x06 requires --session-baudrate between 1 and 16777215')
+	if args.kline_p4_min is not None:
+		if not 0 <= args.kline_p4_min < 18:
+			parser.error('--kline-p4-min must be at least 0 and less than 18 milliseconds')
+		GKFlasher_config['kline']['p4_min'] = args.kline_p4_min
 
 	if args.interface:
 		GKFlasher_config[GKFlasher_config['protocol']]['interface'] = args.interface
@@ -268,7 +289,7 @@ def initialize_bus (protocol: str, protocol_config: dict) -> tuple[DeviceABC, kw
 		channel = device.canbus(protocol_config['bitrate'])
 		transport = Kwp2000OverCanTransport(channel, tx_id=protocol_config['tx_id'], rx_id=protocol_config['rx_id'])
 	else:
-		channel = device.kline()
+		channel = device.kline(timing=KLineTiming(p4_min=protocol_config.get('p4_min', 0)))
 		transport = Kwp2000OverKLineTransport(channel, tx_id=protocol_config['tx_id'], rx_id=protocol_config['rx_id'])
 
 	# opened here rather than by the transport, so the channel outlives the KWP2000 session
@@ -314,33 +335,47 @@ def cli_identify_ecu (bus: kwp2000.Kwp2000Protocol):
 	return ecu
 
 def main(bus: kwp2000.Kwp2000Protocol, args):
+	channel = getattr(bus.transport, 'channel', None)
+	paced_timing = None
+	if isinstance(channel, SerialKLineChannel) and args.kline_p4_min is not None and args.kline_p4_min > 0:
+		# Keep startup frames contiguous; enable guarded pacing after the baud handoff.
+		paced_timing = replace(channel.get_timing(), p4_max=18.0)
+		channel.default_timing = replace(channel.default_timing, p4_min=0)
+		channel.reset_timing()
 	bus.init(kwp2000.commands.StartCommunication(), keepalive_command=kwp2000.commands.TesterPresent(kwp2000.enums.ResponseType.REQUIRED), keepalive_delay=1.5)
 	bus.transport.set_buffer_size(20)
 
 	if args.desired_baudrate and BAUDRATES.get(args.desired_baudrate) != 10400:
 		try:
-			desired_baudrate = DesiredBaudrate(index=args.desired_baudrate, baudrate=BAUDRATES[args.desired_baudrate])
+			baudrate = args.session_baudrate if args.desired_baudrate == 0x06 else BAUDRATES[args.desired_baudrate]
+			desired_baudrate = DesiredBaudrate(index=args.desired_baudrate, baudrate=baudrate)
+			if args.session_baudrate is not None:
+				desired_baudrate.baudrate = args.session_baudrate
 		except KeyError:
 			print('[!] Selected baudrate is invalid! Available baudrates:')
 			for key, baudrate in BAUDRATES.items():
 				print('{} - {}'.format(hex(key), baudrate))
+			print('0x06 - custom (requires --session-baudrate)')
 			return
 
 		print('[*] Trying to start diagnostic session with baudrate {}'.format(desired_baudrate.baudrate))
 		try:
-			bus.execute(kwp2000.commands.StartDiagnosticSession(kwp2000.enums.DiagnosticSession.FLASH_REPROGRAMMING, desired_baudrate.index))
+			bus.execute(desired_baudrate.session_command(kwp2000.enums.DiagnosticSession.FLASH_REPROGRAMMING))
 			bus.transport.channel.set_baudrate(desired_baudrate.baudrate)
 		except TimeoutException:
 			# it's possible that the bus is already running at the desired baudrate - let's check
 			bus.transport.channel.reset_buffers()
 			bus.transport.channel.set_baudrate(desired_baudrate.baudrate)
-			bus.execute(kwp2000.commands.StartDiagnosticSession(kwp2000.enums.DiagnosticSession.FLASH_REPROGRAMMING, desired_baudrate.index))
+			bus.execute(desired_baudrate.session_command(kwp2000.enums.DiagnosticSession.FLASH_REPROGRAMMING))
 	else:
 		# @todo: not ideal, but its a bridge towards moving this completely to the ECU class. it was a mess
 		desired_baudrate = DesiredBaudrate(index=None, baudrate=10400)
 		print('[*] Trying to start diagnostic session')
 		bus.execute(kwp2000.commands.StartDiagnosticSession(kwp2000.enums.DiagnosticSession.FLASH_REPROGRAMMING))
 		
+	if paced_timing is not None:
+		channel.default_timing = paced_timing
+		channel.set_timing(paced_timing)
 	bus.transport.set_timeout(12)
 
 	print('[*] Set timing parameters to maximum')
@@ -546,6 +581,15 @@ if __name__ == '__main__':
 		print('\n[!] Shutting down due to an exception in the main thread. For exception details, see above')
 	if not args.mtos:
 		release_timing(bus)
+		if args.session_baudrate is not None and isinstance(bus.transport, Kwp2000OverKLineTransport):
+			# Omit the baud selector to restore startup speed. StopCommunication
+			# is rejected in the programming session on some SIMK firmware.
+			bus.transport.set_timeout(1)
+			try:
+				bus.execute(kwp2000.commands.StartDiagnosticSession(kwp2000.enums.DiagnosticSession.DEFAULT))
+				bus.transport.channel.set_baudrate(10400)
+			except (kwp2000.Kwp2000NegativeResponseException, TimeoutException) as exc:
+				print('[!] Could not end diagnostic communication: {}'.format(exc))
 	bus.close()
 	device.close()
 	os._exit(0)

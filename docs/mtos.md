@@ -48,6 +48,7 @@ reference bench ECU it is `0x2d381c78`.
 | `loader` | Uploads the built-in K-line loader, then streams `--mtos-payload` to it as a second stage and runs that. Lets you run code larger than the MTOS RAM budget. |
 | `probe`  | Starts the BSL kernel over MTOS and does everything a full flash does before the first erase, then resets the ECU. Writes nothing to the flash. See [Full flash](#full-flash-bsl-kernel-over-mtos). |
 | `read`   | Starts the BSL kernel and reads the whole 512 KB external flash to `-o` (or `mtos_read_<time>.bin`). |
+| `read-calibration` | Reads calibration at 750000 baud in flow-controlled 120-byte blocks, verifies CRC16, saves a BIN, then recovers diagnostics. Experimental: tested on the 24 MHz C167 SIMK43 2.0 with CA663057 and an FTDI adapter. |
 | `fullflash` | Starts the BSL kernel and rewrites the whole flash, **boot sectors included**, from `--mtos-payload` (a 512 KB image). Backs up first. |
 
 > There is deliberately no "write a value to RAM and read it back" self-test mode.
@@ -103,6 +104,45 @@ GKFlasher performs, in order:
    success performs a far `calls 0xC014` into your code.
 
 The firmware is blocked until your code executes `rets`.
+
+### Fast calibration reads
+
+On CA663057, ordinary high-speed KWP memory reads can lose requests even when
+the interface matches the ECU's actual baudrate. The optional MTOS reader avoids
+those repeated requests: its RAM routine streams calibration and a CRC16 at
+750000 baud. It uses the existing ECU region layout, reads the MTOS signature
+live, and requires the correct Siemens key for the installed firmware.
+
+```powershell
+python gkflasher.py --protocol kline --interface COM69 --mtos --mtos-mode read-calibration --mtos-key <your-firmware-key> --output calibration.bin
+```
+
+This mode is currently available from the CLI. Start at the normal 10400 baud;
+omit `--desired-baudrate`, `--session-baudrate`
+and `--kline-p4-min`. The RAM routine switches the UART for the stream. This
+mode assumes a 24 MHz C167; other hardware is untested. It does not change
+the firmware's baud table or write external flash.
+
+The host acknowledges each block before the ECU sends up to 120 bytes. This
+prevents adapter receive overruns when the host or USB driver pauses. The
+routine consumes its own byte echoes before waiting for an acknowledgement;
+the last block is followed by the whole-region CRC16. On the reference bench,
+ten consecutive reads matched both CRC and all reference bytes, with transfers
+taking approximately 2.2 seconds. Setup, security waits and recovery add time
+to the complete command.
+
+The reader saves UART registers directly on the stack to keep its code below
+the firmware's diagnostic workspace at `0xC166`. The payload builder checks
+this boundary before uploading; expanding into live diagnostic RAM can cause
+the firmware to overwrite the payload and reject its checksum.
+
+The output uses the same full-image offsets as a normal calibration read;
+unread boot/program bytes are `FF`. A failed transfer or CRC check does not
+save a new BIN. Setup, upload and diagnostic recovery add time beyond the
+transfer itself. MTOS ends the diagnostic session when the routine returns;
+an immediate subsequent run may need to wait for the ECU's security delay.
+Only an explicit `0x37` response is retried, for up to 30 seconds. Timeouts,
+invalid keys and other refusals remain errors.
 
 > **Session note (ca663057 and later):** on these calibrations `0xFA`'s gate only
 > opens in the **flash-reprogramming** session, while the RAM upload still only

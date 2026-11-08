@@ -51,6 +51,10 @@ MTOS_SIGNATURE_ADDRESS = 0x3FE8  # flash location of the 6-byte reference signat
 MTOS_SIGNATURE_LENGTH = 6
 CRC_SEED = 0x544D  # the 'MT' word; firmware seeds the CRC with it
 CRC_POLY = 0xA001
+CALIBRATION_READ_BAUDRATE = 750000
+CALIBRATION_READ_BLOCK_SIZE = 120
+# The firmware uses diagnostic RAM from here; reader code must stay below it.
+CALIBRATION_READ_CODE_LIMIT = 0xC166
 
 # A convenient, known-executable scratch area for a second stage (XRAM 0xE000-0xEEFF).
 # bsl_shim.a66 and stage2_hello.a66 are assembled for it
@@ -175,6 +179,17 @@ def payload_memory_dump(address: int, length: int) -> bytes:
 	if (address & 0x3FFF) + length > 0x4000:
 		raise ValueError('dump must stay within one 16KB page for this sample')
 	return _code('memory_dump', MTOS_ENTRY, START=address, LENGTH=length)
+
+
+def payload_calibration_read(address: int, length: int) -> bytes:
+	'''CRC-protected, flow-controlled memory stream on the 24 MHz C167 platform.'''
+	if not 1 <= length <= 0x10000 or not 0 <= address <= 0xFFFFFF - length + 1:
+		raise ValueError('Calibration stream requires 1..65536 bytes within 24-bit memory')
+	body = _code('calibration_read', MTOS_ENTRY, START=address, LENGTH=length & 0xFFFF,
+		BAUD_RELOAD=750000 // CALIBRATION_READ_BAUDRATE - 1, BLOCK_SIZE=CALIBRATION_READ_BLOCK_SIZE)
+	if MTOS_ENTRY + len(body) > CALIBRATION_READ_CODE_LIMIT:
+		raise ValueError('MTOS calibration reader overlaps firmware diagnostic RAM')
+	return body
 
 
 def payload_loader(stage2_address: int = STAGE2_ADDRESS) -> bytes:
