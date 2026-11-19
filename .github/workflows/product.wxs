@@ -86,7 +86,7 @@
                             <File Id="LzssCodecAsset" Source="assets\lzss_codec.a66" />
                         </Component>
                         <Directory Id="FONTSDIR" Name="fonts">
-                            <Component Id="FontFiles" Guid="*">
+                            <Component Id="FontFiles" Guid="{B9A845D7-2D23-4EF8-A63C-419E03D726F1}">
                                 <File Id="DejaVuSansFont" Source="assets\fonts\DejaVuSans.ttf" KeyPath="yes" />
                                 <File Id="DejaVuSansBoldFont" Source="assets\fonts\DejaVuSans-Bold.ttf" />
                                 <File Id="DejaVuSansMonoFont" Source="assets\fonts\DejaVuSansMono.ttf" />
